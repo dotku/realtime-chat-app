@@ -225,8 +225,10 @@ realtime-chat-app/
 - Error handling and connection cleanup
 
 ### Session-Based Messaging
-- No message persistence (as per requirements)
+- No database persistence for messages (as per requirements)
 - Messages exist only during active sessions
+- **Message Queue**: Up to 50 pending messages per user stored in memory
+- Messages delivered automatically when recipient comes online
 - Lightweight and fast communication
 - Focus on real-time interaction
 

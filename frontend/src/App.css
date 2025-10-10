@@ -79,6 +79,31 @@ body {
   display: flex;
   height: 100vh;
   background: #f5f5f5;
+  position: relative;
+}
+
+/* Reconnecting Banner */
+.reconnecting-banner {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  background: #ff9800;
+  color: white;
+  padding: 0.75rem;
+  text-align: center;
+  font-weight: 600;
+  z-index: 1000;
+  animation: pulse 2s infinite;
+}
+
+@keyframes pulse {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.8;
+  }
 }
 
 /* Sidebar */
@@ -102,12 +127,48 @@ body {
   font-size: 1.25rem;
 }
 
+.user-info-badge {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
 .user-badge {
   display: inline-block;
   background: rgba(255, 255, 255, 0.2);
   padding: 0.25rem 0.75rem;
   border-radius: 20px;
   font-size: 0.875rem;
+  font-weight: 600;
+}
+
+.user-id {
+  display: inline-block;
+  background: rgba(255, 255, 255, 0.15);
+  padding: 0.25rem 0.75rem;
+  border-radius: 4px;
+  font-size: 0.75rem;
+  font-family: 'Courier New', monospace;
+  word-break: break-all;
+  opacity: 0.9;
+}
+
+.logout-button {
+  margin-top: 0.5rem;
+  padding: 0.5rem 1rem;
+  background: rgba(255, 255, 255, 0.2);
+  color: white;
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  border-radius: 4px;
+  font-size: 0.875rem;
+  cursor: pointer;
+  transition: all 0.2s;
+  width: 100%;
+}
+
+.logout-button:hover {
+  background: rgba(255, 255, 255, 0.3);
+  border-color: rgba(255, 255, 255, 0.5);
 }
 
 .users-list {
