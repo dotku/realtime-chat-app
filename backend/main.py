@@ -2,6 +2,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, HTTPExcept
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import OperationalError, SQLAlchemyError
+from sqlalchemy import text
 from datetime import datetime
 import uuid
 import json
@@ -43,6 +44,12 @@ async def startup_event():
         logging.warning("Application will run without database persistence")
 
 
+@app.get("/ping")
+async def ping():
+    """Lightweight liveness probe for Koyeb health check — no DB dependency."""
+    return {"status": "ok"}
+
+
 @app.get("/")
 async def root():
     return {"message": "Real-Time Chat API", "status": "running"}
@@ -52,7 +59,7 @@ async def root():
 async def health_check(db: Session = Depends(get_db)):
     db_status = "connected"
     try:
-        db.execute("SELECT 1")
+        db.execute(text("SELECT 1"))
     except Exception as e:
         db_status = f"disconnected: {str(e)}"
         logging.error(f"Database health check failed: {e}")

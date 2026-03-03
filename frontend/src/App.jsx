@@ -14,11 +14,27 @@ function App() {
   const [messageInput, setMessageInput] = useState('');
   const [reconnectAttempts, setReconnectAttempts] = useState(0);
   const [isReconnecting, setIsReconnecting] = useState(false);
+  const [serverStatus, setServerStatus] = useState('checking'); // 'checking' | 'online' | 'offline'
   const ws = useRef(null);
   const messagesEndRef = useRef(null);
   const reconnectTimeoutRef = useRef(null);
   const shouldReconnect = useRef(true);
   const isConnectingRef = useRef(false); // Prevent multiple simultaneous connections
+
+  // Health check on mount and every 30 seconds
+  useEffect(() => {
+    const checkHealth = async () => {
+      try {
+        const res = await fetch(`${API_URL}/health`, { signal: AbortSignal.timeout(5000) });
+        setServerStatus(res.ok ? 'online' : 'offline');
+      } catch {
+        setServerStatus('offline');
+      }
+    };
+    checkHealth();
+    const interval = setInterval(checkHealth, 30000);
+    return () => clearInterval(interval);
+  }, []);
 
   // Auto-connect if user info exists in localStorage
   useEffect(() => {
@@ -307,7 +323,13 @@ function App() {
     return (
       <div className="login-container">
         <div className="login-box">
-          <h1>💬 Real-Time Chat</h1>
+          <h1>Real-Time Chat</h1>
+          <div className={`server-status server-status--${serverStatus}`}>
+            <span className="server-status-dot"></span>
+            {serverStatus === 'checking' && 'Checking server...'}
+            {serverStatus === 'online' && 'Server online'}
+            {serverStatus === 'offline' && 'Server offline — please try later'}
+          </div>
           <p>Enter a username or leave blank for a random one</p>
           <input
             type="text"
@@ -317,7 +339,7 @@ function App() {
             onKeyPress={(e) => e.key === 'Enter' && handleJoin()}
             className="username-input"
           />
-          <button onClick={handleJoin} className="join-button">
+          <button onClick={handleJoin} className="join-button" disabled={serverStatus === 'offline'}>
             Join Chat
           </button>
         </div>
