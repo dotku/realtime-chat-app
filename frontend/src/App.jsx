@@ -323,7 +323,7 @@ function App() {
     return (
       <div className="login-container">
         <div className="login-box">
-          <h1>Real-Time Chat</h1>
+          <h1>SphareChat</h1>
           <div className={`server-status server-status--${serverStatus}`}>
             <span className="server-status-dot"></span>
             {serverStatus === 'checking' && 'Checking server...'}
@@ -438,7 +438,7 @@ function App() {
           </>
         ) : (
           <div className="no-chat-selected">
-            <h2>👋 Welcome to Real-Time Chat!</h2>
+            <h2>Welcome to SphareChat</h2>
             <p>Select a user from the list to start chatting</p>
           </div>
         )}
