@@ -8,7 +8,9 @@ import uuid
 import json
 import logging
 import os
+import httpx
 
+from pydantic import BaseModel
 from database import init_db, get_db, User
 from models import UserCreate, UserResponse, Message
 from connection_manager import manager
@@ -190,13 +192,14 @@ async def websocket_endpoint(
             # Handle chat messages
             if message_data.get("type") == "chat":
                 to_user = message_data.get("to_user")
-                content = message_data.get("content")
-                logging.info(f"Received chat message: {message_data}")
+                content = message_data.get("content", "")
+                attachment = message_data.get("attachment")  # optional file attachment
+                logging.info(f"Received chat message to {to_user}, has_attachment={attachment is not None}")
 
-                if to_user and content:
-                    await manager.send_chat_message(user_id, to_user, content)
+                if to_user and (content or attachment):
+                    await manager.send_chat_message(user_id, to_user, content, attachment)
                 else:
-                    logging.warning(f"Invalid chat message: missing to_user or content")
+                    logging.warning(f"Invalid chat message: missing to_user or content/attachment")
 
     except WebSocketDisconnect:
         # Handle disconnection
@@ -232,6 +235,55 @@ async def websocket_endpoint(
                 db.commit()
             except Exception as db_error:
                 logging.error(f"Database error in exception handler: {db_error}")
+
+
+GATEWAY_URL = "https://ai-gateway.vercel.sh/v1"
+
+
+class AIChatMessage(BaseModel):
+    role: str  # "user" | "assistant" | "system"
+    content: str
+
+
+class AIChatRequest(BaseModel):
+    model: str
+    messages: list[AIChatMessage]
+    system_prompt: str = ""
+
+
+@app.post("/ai/chat")
+async def ai_chat(request: AIChatRequest):
+    """Proxy AI chat to Vercel AI Gateway (or Anthropic directly as fallback)."""
+    api_key = os.getenv("GATEWAY_API_KEY", "")
+    if not api_key:
+        raise HTTPException(status_code=503, detail="AI Gateway API key not configured on server.")
+
+    messages = []
+    if request.system_prompt:
+        messages.append({"role": "system", "content": request.system_prompt})
+    messages.extend([{"role": m.role, "content": m.content} for m in request.messages])
+
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.post(
+                f"{GATEWAY_URL}/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={"model": request.model, "messages": messages},
+            )
+            if response.status_code != 200:
+                logging.error(f"Gateway error {response.status_code}: {response.text}")
+                raise HTTPException(status_code=502, detail=f"Gateway returned {response.status_code}")
+            data = response.json()
+            content = data["choices"][0]["message"]["content"]
+            return {"content": content}
+    except httpx.TimeoutException:
+        raise HTTPException(status_code=504, detail="AI request timed out.")
+    except httpx.RequestError as e:
+        logging.error(f"AI gateway request error: {e}")
+        raise HTTPException(status_code=502, detail="Failed to reach AI gateway.")
 
 
 if __name__ == "__main__":

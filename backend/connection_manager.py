@@ -75,7 +75,7 @@ class ConnectionManager:
                 except Exception as e:
                     print(f"Error broadcasting to {user_id}: {e}")
 
-    async def send_chat_message(self, from_user: str, to_user: str, content: str):
+    async def send_chat_message(self, from_user: str, to_user: str, content: str, attachment: dict = None):
         """Send a chat message between two users"""
         message = {
             "type": "chat",
@@ -85,6 +85,8 @@ class ConnectionManager:
             "content": content,
             "timestamp": datetime.utcnow().isoformat()
         }
+        if attachment:
+            message["attachment"] = attachment
 
         print(f"Sending chat message from {from_user} to {to_user}: {content}")
         print(f"Active connections: {list(self.active_connections.keys())}")
