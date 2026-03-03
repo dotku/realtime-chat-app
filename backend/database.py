@@ -9,7 +9,12 @@ load_dotenv()
 
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://chatuser:chatpass@db:5432/chatdb")
 
-engine = create_engine(DATABASE_URL)
+# Neon and other cloud PostgreSQL providers require SSL; add connect_args only when needed
+_connect_args = {}
+if "sslmode=require" in DATABASE_URL or "neon.tech" in DATABASE_URL:
+    _connect_args = {"sslmode": "require"}
+
+engine = create_engine(DATABASE_URL, connect_args=_connect_args)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 

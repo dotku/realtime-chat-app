@@ -6,6 +6,7 @@ from datetime import datetime
 import uuid
 import json
 import logging
+import os
 
 from database import init_db, get_db, User
 from models import UserCreate, UserResponse, Message
@@ -15,10 +16,17 @@ logging.basicConfig(level=logging.INFO)
 
 app = FastAPI(title="Real-Time Chat API")
 
-# CORS middleware
+# CORS middleware - read allowed origins from environment variables
+_raw_origins = os.getenv("ALLOWED_ORIGINS", "http://localhost:3000,http://localhost:5173")
+allowed_origins = [o.strip() for o in _raw_origins.split(",") if o.strip()]
+
+# Optional regex for wildcard subdomain support, e.g. https://.*\.jytech\.us
+cors_origin_regex = os.getenv("CORS_ORIGIN_REGEX", None)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://localhost:5173"],
+    allow_origins=allowed_origins,
+    allow_origin_regex=cors_origin_regex,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
