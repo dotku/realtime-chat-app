@@ -30,6 +30,13 @@ class User(Base):
     is_member = Column(Boolean, default=False)
     auth0_sub = Column(String, unique=True, nullable=True, index=True)  # e.g. "auth0|abc123"
     credits_cents = Column(Integer, default=100)  # 100 = $1.00 (anonymous); registered users get 500
+    membership_tier = Column(String, default='free')         # 'free' | 'pro' | 'team'
+    membership_billing = Column(String, nullable=True)       # 'monthly' | 'yearly' | None
+    membership_expires_at = Column(DateTime, nullable=True)
+    stripe_customer_id = Column(String, nullable=True)
+    stripe_subscription_id = Column(String, nullable=True)
+    daily_ai_usage_cents = Column(Integer, default=0)
+    daily_ai_usage_date = Column(String, nullable=True)      # 'YYYY-MM-DD'
 
 
 class Group(Base):

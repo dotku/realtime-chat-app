@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@auth0/auth0-react": "^2.15.0",
+    "@vercel/analytics": "^1.6.1",
     "mammoth": "^1.11.0",
     "pdfjs-dist": "^5.5.207",
     "react": "^19.1.1",

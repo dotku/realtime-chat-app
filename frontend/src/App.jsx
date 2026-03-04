@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { useAuth0 } from '@auth0/auth0-react';
+import { Analytics } from '@vercel/analytics/react';
 import './App.css';
 import { saveMessage, loadMessages, clearMessages, getStorageUsage, fetchMessagesFromServer, makeConversationId } from './messageStore';
 import { API_URL, WS_URL, GATEWAY_MODELS_URL, POPULAR_MODELS, makeAiUser, makeAgentUser } from './utils/constants';
@@ -33,6 +34,8 @@ function App() {
   const [upgradeReason, setUpgradeReason] = useState(null);
   const [userCredits, setUserCredits] = useState(null);
   const [userIsMember, setUserIsMember] = useState(false);
+  const [userTier, setUserTier] = useState('free');
+  const [userBilling, setUserBilling] = useState(null);
   const [userIsAnonymous, setUserIsAnonymous] = useState(true);
   const [showCredits, setShowCredits] = useState(false);
   const [userPicture, setUserPicture] = useState(null);
@@ -77,6 +80,8 @@ function App() {
       const data = await res.json();
       setUserCredits(data.credits_cents);
       if (data.is_member !== undefined) setUserIsMember(data.is_member);
+      if (data.tier) { setUserTier(data.tier); setUserIsMember(data.tier !== 'free'); }
+      if (data.billing !== undefined) setUserBilling(data.billing);
       if (!isAuthenticated) setUserIsAnonymous(data.is_anonymous);
     } catch { /* non-critical */ }
   };
@@ -84,11 +89,13 @@ function App() {
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     if (params.get('membership') === 'success') {
+      const tier = params.get('tier') || 'pro';
       window.history.replaceState({}, '', window.location.pathname);
       setUserIsMember(true);
+      setUserTier(tier);
       const uid = localStorage.getItem('chat_userId');
       if (uid) fetchCredits(uid);
-      setTimeout(() => toast('Welcome, member! You now have unlimited AI access.', 'success', 5000), 300);
+      setTimeout(() => toast(`Welcome to ${tier === 'team' ? 'Team' : 'Pro'}! Enjoy your upgraded AI access.`, 'success', 5000), 300);
     }
     if (params.get('membership') === 'cancelled') {
       window.history.replaceState({}, '', window.location.pathname);
@@ -121,7 +128,7 @@ function App() {
         if (!res.ok) { console.error('Auth login failed', await res.text()); return; }
         const data = await res.json();
         setUserId(data.user_id); setUsername(data.username);
-        setUserCredits(data.credits_cents ?? null); setUserIsMember(data.is_member ?? false); setUserIsAnonymous(false);
+        setUserCredits(data.credits_cents ?? null); setUserIsMember(data.tier ? data.tier !== 'free' : (data.is_member ?? false)); setUserTier(data.tier || 'free'); setUserBilling(data.billing || null); setUserIsAnonymous(false);
         setUserPicture(auth0User.picture || null); setUserEmail(auth0User.email || null);
         localStorage.setItem('chat_userId', data.user_id); localStorage.setItem('chat_username', data.username);
         if (!isConnectingRef.current && wsUserIdRef.current !== data.user_id) connectWebSocket(data.user_id, data.username);
@@ -223,6 +230,11 @@ function App() {
       } else if (data.type === 'user_groups') { setGroups(data.groups); }
       else if (data.type === 'group_created') { setGroups(prev => prev.find(g => g.group_id === data.group.group_id) ? prev : [...prev, data.group]); }
       else if (data.type === 'group_updated') { setGroups(prev => prev.map(g => g.group_id === data.group.group_id ? data.group : g)); }
+      else if (data.type === 'group_kicked') {
+        setGroups(prev => prev.filter(g => g.group_id !== data.group_id));
+        if (selectedUserRef.current?.user_id === data.group_id) setSelectedUser(null);
+        toast('You have been removed from a group', 'info');
+      }
     };
     ws.current.onclose = async (event) => {
       isConnectingRef.current = false; setIsConnected(false);
@@ -335,6 +347,13 @@ function App() {
   const selectContact = (user) => { setSelectedUser(user); setUnreadCounts(prev => ({ ...prev, [user.user_id]: 0 })); setPendingMentionUsers([]); setActiveTab('users'); };
   const saveAgent = () => { if (!agentDraft.name.trim()) return; const updated = [...agents, { ...agentDraft, id: Date.now().toString() }]; setAgents(updated); saveAgentsToStorage(updated); setAgentDraft({ name: '', model: POPULAR_MODELS[0].id, systemPrompt: '', icon: '🛠' }); setShowAgentForm(false); };
   const deleteAgent = (id) => { const updated = agents.filter(a => a.id !== id); setAgents(updated); saveAgentsToStorage(updated); };
+  const handleKickMember = async (groupId, memberId) => {
+    try {
+      const res = await fetch(`${API_URL}/groups/${encodeURIComponent(groupId)}/members/${encodeURIComponent(memberId)}?user_id=${encodeURIComponent(userId)}`, { method: 'DELETE' });
+      if (!res.ok) { const err = await res.json().catch(() => ({})); throw new Error(err.detail || 'Failed to remove member'); }
+      toast('Member removed', 'success');
+    } catch (err) { console.error('Kick member error:', err); toast(err.message, 'error'); }
+  };
   const handleCreateGroup = async () => {
     if (!groupDraft.name.trim()) return;
     try { const res = await fetch(`${API_URL}/groups`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: groupDraft.name, icon: groupDraft.icon, created_by: userId, member_ids: [userId, ...groupDraft.memberIds] }) }); if (!res.ok) throw new Error('Failed to create group'); const data = await res.json(); setGroups(prev => prev.find(g => g.group_id === data.group_id) ? prev : [...prev, data]); setGroupDraft({ name: '', icon: '👥', memberIds: [] }); setShowGroupForm(false); }
@@ -348,6 +367,8 @@ function App() {
   const handleUpgradeMembership = async () => { try { const res = await fetch(`${API_URL}/stripe/checkout`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ user_id: userId }) }); const data = await res.json(); if (data.checkout_url) window.location.href = data.checkout_url; else throw new Error(data.detail || 'No checkout URL'); } catch (err) { console.error('Checkout error:', err); alert('Unable to start checkout. Please try again.'); } };
   const handleSignIn = () => { loginWithRedirect(); };
   const handleBuyCredits = async (amountDollars = 5) => { try { const res = await fetch(`${API_URL}/stripe/buy-credits`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ user_id: userId, amount_dollars: amountDollars }) }); const data = await res.json(); if (data.checkout_url) window.location.href = data.checkout_url; else throw new Error(data.detail || 'No checkout URL'); } catch (err) { console.error('Buy credits error:', err); alert('Unable to start checkout. Please try again.'); } };
+  const handleSubscribe = async (tier = 'pro', billing = 'monthly') => { try { const res = await fetch(`${API_URL}/stripe/subscribe`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ user_id: userId, tier, billing }) }); const data = await res.json(); if (data.checkout_url) window.location.href = data.checkout_url; else throw new Error(data.detail || 'No checkout URL'); } catch (err) { console.error('Subscribe error:', err); alert('Unable to start checkout. Please try again.'); } };
+  const handleManageSubscription = async () => { try { const res = await fetch(`${API_URL}/stripe/manage`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ user_id: userId }) }); const data = await res.json(); if (data.portal_url) window.location.href = data.portal_url; else throw new Error(data.detail || 'No portal URL'); } catch (err) { console.error('Portal error:', err); alert('Unable to open subscription management.'); } };
   const getMessagesForCurrentChat = () => { if (!selectedUser) return []; if (selectedUser.type === 'group') return messages.filter(m => m.to_user === selectedUser.user_id); return messages.filter(m => (m.from_user === userId && m.to_user === selectedUser.user_id) || (m.from_user === selectedUser.user_id && m.to_user === userId)); };
 
   const loadOlderMessages = async () => {
@@ -382,11 +403,12 @@ function App() {
         <div className="reconnecting-banner">{reconnectAttempts > 0 ? <>🔄 Reconnecting... (Attempt {reconnectAttempts}/10)</> : <>⚠️ Disconnected from server...</>}</div>
       )}
       <Sidebar soundEnabled={soundEnabled} toggleSound={toggleSound} showSettings={showSettings} setShowSettings={setShowSettings} showProfile={showProfile} setShowProfile={setShowProfile} isAuthenticated={isAuthenticated} handleSignIn={handleSignIn} userPicture={userPicture} username={username} editingName={editingName} setEditingName={setEditingName} draftName={draftName} setDraftName={setDraftName} setUsername={setUsername} userCredits={userCredits} userIsMember={userIsMember} userIsAnonymous={userIsAnonymous} auth0Loading={auth0Loading} auth0Error={auth0Error} auth0User={auth0User} handleLogout={handleLogout} handleClearHistory={handleClearHistory} storageLimitMb={storageLimitMb} handleLimitChange={handleLimitChange} storageUsage={storageUsage} formatBytes={formatBytes} activeTab={activeTab} setActiveTab={setActiveTab} selectedUser={selectedUser} selectContact={selectContact} unreadCounts={unreadCounts} onlineUsers={onlineUsers} groups={groups} agents={agents} showGroupForm={showGroupForm} setShowGroupForm={setShowGroupForm} groupDraft={groupDraft} setGroupDraft={setGroupDraft} handleCreateGroup={handleCreateGroup} showAgentForm={showAgentForm} setShowAgentForm={setShowAgentForm} agentDraft={agentDraft} setAgentDraft={setAgentDraft} saveAgent={saveAgent} deleteAgent={deleteAgent} getIdTokenClaims={getIdTokenClaims} connectWebSocket={connectWebSocket} wsUserIdRef={wsUserIdRef} API_URL={API_URL} setUserId={setUserId} setUserCredits={setUserCredits} setUserIsAnonymous={setUserIsAnonymous} setUserPicture={setUserPicture} setUserEmail={setUserEmail} setShowCredits={setShowCredits} />
-      <ChatArea selectedUser={selectedUser} userId={userId} currentMessages={getMessagesForCurrentChat()} aiLoading={aiLoading} messageInput={messageInput} handleInputChange={handleInputChange} handleKeyPress={handleKeyPress} sendMessage={sendMessage} pendingAttachment={pendingAttachment} setPendingAttachment={setPendingAttachment} fileInputRef={fileInputRef} messageInputRef={messageInputRef} handleFileSelect={(e) => handleFileSelect(e, setPendingAttachment)} mentionCandidates={mentionCandidates} applyMention={applyMention} pendingMentionUsers={pendingMentionUsers} setPendingMentionUsers={setPendingMentionUsers} messagesEndRef={messagesEndRef} loadOlderMessages={loadOlderMessages} loadingOlder={loadingOlder} hasMoreMessages={hasMoreMessages} makeConversationId={makeConversationId} />
+      <ChatArea selectedUser={selectedUser} userId={userId} currentMessages={getMessagesForCurrentChat()} aiLoading={aiLoading} messageInput={messageInput} handleInputChange={handleInputChange} handleKeyPress={handleKeyPress} sendMessage={sendMessage} pendingAttachment={pendingAttachment} setPendingAttachment={setPendingAttachment} fileInputRef={fileInputRef} messageInputRef={messageInputRef} handleFileSelect={(e) => handleFileSelect(e, setPendingAttachment)} mentionCandidates={mentionCandidates} applyMention={applyMention} pendingMentionUsers={pendingMentionUsers} setPendingMentionUsers={setPendingMentionUsers} messagesEndRef={messagesEndRef} loadOlderMessages={loadOlderMessages} loadingOlder={loadingOlder} hasMoreMessages={hasMoreMessages} makeConversationId={makeConversationId} onKickMember={handleKickMember} onlineUsers={onlineUsers} />
       <ProfileModal showProfile={showProfile} setShowProfile={setShowProfile} userPicture={userPicture} username={username} userEmail={userEmail} userIsAnonymous={userIsAnonymous} userIsMember={userIsMember} userCredits={userCredits} handleBuyCredits={handleBuyCredits} handleUpgradeMembership={handleUpgradeMembership} handleLogout={handleLogout} setShowCredits={setShowCredits} />
       <UpgradeModal upgradeReason={upgradeReason} setUpgradeReason={setUpgradeReason} handleBuyCredits={handleBuyCredits} handleUpgradeMembership={handleUpgradeMembership} loginWithRedirect={loginWithRedirect} userIsAnonymous={userIsAnonymous} />
       <CreditsModal showCredits={showCredits} setShowCredits={setShowCredits} userCredits={userCredits} userIsAnonymous={userIsAnonymous} isMember={userIsMember} handleBuyCredits={handleBuyCredits} handleUpgradeMembership={handleUpgradeMembership} loginWithRedirect={loginWithRedirect} />
       <ToastContainer />
+      <Analytics />
     </div>
   );
 }

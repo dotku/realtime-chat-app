@@ -13,15 +13,20 @@ import httpx
 import stripe
 from jose import jwt as jose_jwt, JWTError
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional
 from database import init_db, get_db, User, Group, GroupMember, ChatMessage, make_conversation_id, engine
 from models import UserCreate, UserResponse, GroupCreate, GroupResponse, Message
 from connection_manager import manager
+from rate_limiter import limiter, rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from middleware import SecurityHeadersMiddleware, RequestSizeLimitMiddleware
 
 logging.basicConfig(level=logging.INFO)
 
 app = FastAPI(title="Real-Time Chat API")
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, rate_limit_exceeded_handler)
 
 # CORS middleware - read allowed origins from environment variables
 _raw_origins = os.getenv("ALLOWED_ORIGINS", "http://localhost:3000,http://localhost:5173")
@@ -30,13 +35,15 @@ allowed_origins = [o.strip() for o in _raw_origins.split(",") if o.strip()]
 # Optional regex for wildcard subdomain support, e.g. https://.*\.jytech\.us
 cors_origin_regex = os.getenv("CORS_ORIGIN_REGEX", None)
 
+app.add_middleware(SecurityHeadersMiddleware)
+app.add_middleware(RequestSizeLimitMiddleware, max_bytes=10 * 1024 * 1024)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,
     allow_origin_regex=cors_origin_regex,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization", "Stripe-Signature"],
 )
 
 
@@ -119,6 +126,35 @@ async def startup_event():
             conn.execute(text(
                 "ALTER TABLE users ADD COLUMN IF NOT EXISTS credits_cents INTEGER DEFAULT 100"
             ))
+            # Membership tier columns
+            conn.execute(text(
+                "ALTER TABLE users ADD COLUMN IF NOT EXISTS membership_tier VARCHAR DEFAULT 'free'"
+            ))
+            conn.execute(text(
+                "ALTER TABLE users ADD COLUMN IF NOT EXISTS membership_billing VARCHAR"
+            ))
+            conn.execute(text(
+                "ALTER TABLE users ADD COLUMN IF NOT EXISTS membership_expires_at TIMESTAMP"
+            ))
+            conn.execute(text(
+                "ALTER TABLE users ADD COLUMN IF NOT EXISTS stripe_customer_id VARCHAR"
+            ))
+            conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_users_stripe_customer ON users (stripe_customer_id) WHERE stripe_customer_id IS NOT NULL"
+            ))
+            conn.execute(text(
+                "ALTER TABLE users ADD COLUMN IF NOT EXISTS stripe_subscription_id VARCHAR"
+            ))
+            conn.execute(text(
+                "ALTER TABLE users ADD COLUMN IF NOT EXISTS daily_ai_usage_cents INTEGER DEFAULT 0"
+            ))
+            conn.execute(text(
+                "ALTER TABLE users ADD COLUMN IF NOT EXISTS daily_ai_usage_date VARCHAR"
+            ))
+            # Backfill: existing is_member=true users become 'pro'
+            conn.execute(text(
+                "UPDATE users SET membership_tier = 'pro' WHERE is_member = TRUE AND (membership_tier IS NULL OR membership_tier = 'free')"
+            ))
             # Ensure messages table and indexes exist
             conn.execute(text("""
                 CREATE TABLE IF NOT EXISTS messages (
@@ -182,7 +218,8 @@ async def health_check(db: Session = Depends(get_db)):
 
 
 @app.post("/users", response_model=UserResponse)
-async def create_user(user: UserCreate, db: Session = Depends(get_db)):
+@limiter.limit("10/minute")
+async def create_user(request: Request, user: UserCreate, db: Session = Depends(get_db)):
     """Create a new user with auto-generated UUID"""
     user_id = str(uuid.uuid4())
 
@@ -286,8 +323,22 @@ async def websocket_endpoint(
             logging.error(f"Error closing websocket for DB error: {close_error}")
         return
 
+    # Check per-IP connection limit
+    client_ip = websocket.client.host if websocket.client else ""
+    if not manager.check_ip_limit(client_ip):
+        try:
+            await websocket.accept()
+            await websocket.send_json({
+                "type": "error", "code": 4029,
+                "message": "Too many connections from your IP."
+            })
+            await websocket.close(code=4029, reason="Too many connections")
+        except Exception:
+            pass
+        return
+
     # Connect the user (this will accept the WebSocket and register the connection)
-    await manager.connect(websocket, user_id, user.username)
+    await manager.connect(websocket, user_id, user.username, client_ip=client_ip)
 
     # Update user status in database
     try:
@@ -341,17 +392,58 @@ async def websocket_endpoint(
     except Exception as e:
         logging.error(f"Error loading groups for {user_id}: {e}")
 
+    # WebSocket message rate limiting: 30 msgs/min per user
+    _ws_msg_timestamps: list[float] = []
+    _WS_RATE_LIMIT = 30
+    _WS_RATE_WINDOW = 60.0  # seconds
+
     try:
         while True:
             # Receive message from client
             data = await websocket.receive_text()
+
+            # Validate message size (50 KB max)
+            if len(data) > 50 * 1024:
+                await manager.send_personal_message(
+                    {"type": "error", "message": "Message too large (max 50KB)."}, user_id
+                )
+                continue
+
             message_data = json.loads(data)
+
+            # Rate limit check
+            import time as _time
+            now = _time.time()
+            _ws_msg_timestamps[:] = [t for t in _ws_msg_timestamps if now - t < _WS_RATE_WINDOW]
+            if len(_ws_msg_timestamps) >= _WS_RATE_LIMIT:
+                await manager.send_personal_message(
+                    {"type": "error", "message": "Rate limit exceeded. Please slow down."}, user_id
+                )
+                continue
+            _ws_msg_timestamps.append(now)
 
             # Handle chat messages
             if message_data.get("type") == "chat":
                 to_user = message_data.get("to_user")
                 content = message_data.get("content", "")
                 attachment = message_data.get("attachment")  # optional file attachment
+
+                # Validate content length per tier
+                ws_tier = _get_effective_tier(user)
+                max_chars = TIER_CONFIG[ws_tier]['max_chars']
+                if content and len(content) > max_chars:
+                    await manager.send_personal_message(
+                        {"type": "error", "message": f"Message too long (max {max_chars:,} chars for {ws_tier} tier)."}, user_id
+                    )
+                    continue
+
+                # Validate attachment size (max 5 MB base64)
+                if attachment and attachment.get("data") and len(attachment["data"]) > 5 * 1024 * 1024:
+                    await manager.send_personal_message(
+                        {"type": "error", "message": "Attachment too large (max 5MB)."}, user_id
+                    )
+                    continue
+
                 message_id = str(uuid.uuid4())
                 logging.info(f"Received chat message to {to_user}, has_attachment={attachment is not None}")
 
@@ -476,6 +568,63 @@ _USER_COST_RATE_CENTS = _AVG_COST_PER_TOKEN * 5 * 100  # = 0.0015 cents/token
 ANON_CREDIT_CENTS = 100    # $1.00 — anonymous users
 NEW_USER_CREDIT_CENTS = 500  # $5.00 — new registered users
 
+# ── Membership tier configuration ────────────────────────────────────────────
+TIER_CONFIG = {
+    'free':  {'daily_limit_cents': 0,    'rate_limit': 20, 'max_chars': 10_000},
+    'pro':   {'daily_limit_cents': 500,  'rate_limit': 40, 'max_chars': 20_000},
+    'team':  {'daily_limit_cents': 2000, 'rate_limit': 60, 'max_chars': 50_000},
+}
+
+STRIPE_PRICES = {
+    'pro_monthly':  os.getenv('STRIPE_PRICE_PRO_MONTHLY', ''),
+    'pro_yearly':   os.getenv('STRIPE_PRICE_PRO_YEARLY', ''),
+    'team_monthly': os.getenv('STRIPE_PRICE_TEAM_MONTHLY', ''),
+    'team_yearly':  os.getenv('STRIPE_PRICE_TEAM_YEARLY', ''),
+}
+
+# Reverse lookup: price_id → (tier, billing)
+PRICE_TO_TIER: dict[str, tuple[str, str]] = {}
+for _key, _pid in STRIPE_PRICES.items():
+    if _pid:
+        _tier, _billing = _key.split('_', 1)
+        PRICE_TO_TIER[_pid] = (_tier, _billing)
+
+
+def _get_effective_tier(user) -> str:
+    """Return the user's effective tier, checking expiration."""
+    tier = getattr(user, 'membership_tier', 'free') or 'free'
+    if tier != 'free':
+        expires = getattr(user, 'membership_expires_at', None)
+        if expires and expires < datetime.utcnow():
+            return 'free'
+    return tier
+
+
+def _get_user_daily_usage(user) -> int:
+    """Return user's AI usage in cents for today, resetting if date changed."""
+    today = _today()
+    if getattr(user, 'daily_ai_usage_date', None) != today:
+        return 0
+    return getattr(user, 'daily_ai_usage_cents', 0) or 0
+
+
+# In-memory per-user AI request timestamps for tier-based rate limiting
+_ai_rate_timestamps: dict[str, list[float]] = {}
+
+
+def _check_ai_rate_limit(user_id: str, tier: str) -> bool:
+    """Return True if within rate limit for the user's tier."""
+    import time
+    max_per_min = TIER_CONFIG.get(tier, TIER_CONFIG['free'])['rate_limit']
+    now = time.time()
+    timestamps = _ai_rate_timestamps.get(user_id, [])
+    timestamps = [t for t in timestamps if now - t < 60]
+    _ai_rate_timestamps[user_id] = timestamps
+    if len(timestamps) >= max_per_min:
+        return False
+    timestamps.append(now)
+    return True
+
 
 def _calc_user_cost_cents(total_tokens: int) -> int:
     """Cost charged to the user in cents (minimum 1 cent per request)."""
@@ -516,18 +665,39 @@ class AIChatRequest(BaseModel):
 
 
 @app.post("/ai/chat")
-async def ai_chat(req: AIChatRequest, db: Session = Depends(get_db)):
-    """Proxy AI chat to Vercel AI Gateway."""
-    is_member = False
+@limiter.limit("60/minute")  # ceiling; per-tier enforcement below
+async def ai_chat(request: Request, req: AIChatRequest, db: Session = Depends(get_db)):
+    """Proxy AI chat to Vercel AI Gateway with per-tier limits."""
     user = None
+    tier = 'free'
     if req.user_id:
         try:
             user = db.query(User).filter(User.user_id == req.user_id).first()
-            is_member = bool(getattr(user, "is_member", False))
+            if user:
+                tier = _get_effective_tier(user)
         except Exception:
             pass
 
-    if not is_member:
+    tier_config = TIER_CONFIG[tier]
+
+    # Per-tier rate limit
+    if not _check_ai_rate_limit(req.user_id or (request.client.host if request.client else ""), tier):
+        raise HTTPException(status_code=429, detail={
+            "code": "RATE_LIMITED",
+            "message": f"Rate limit: {tier_config['rate_limit']}/min for {tier} tier.",
+            "tier": tier,
+        })
+
+    # Per-tier message character limit
+    total_chars = sum(len(m.content) if isinstance(m.content, str) else 0 for m in req.messages)
+    if total_chars > tier_config['max_chars']:
+        raise HTTPException(status_code=413, detail={
+            "code": "MESSAGE_TOO_LONG",
+            "message": f"Message too long. {tier} tier limit: {tier_config['max_chars']:,} chars.",
+            "tier": tier,
+        })
+
+    if tier == 'free':
         # Platform-wide safety net
         if _get_daily_cost() >= DAILY_AI_LIMIT_USD:
             raise HTTPException(
@@ -537,6 +707,7 @@ async def ai_chat(req: AIChatRequest, db: Session = Depends(get_db)):
                     "message": f"Platform AI credit limit of ${DAILY_AI_LIMIT_USD:.0f}/day has been reached.",
                     "limit_usd": DAILY_AI_LIMIT_USD,
                     "used_usd": round(_get_daily_cost(), 4),
+                    "tier": tier,
                 },
             )
         # Per-user credit check
@@ -555,6 +726,22 @@ async def ai_chat(req: AIChatRequest, db: Session = Depends(get_db)):
                             else "You've used all your AI credits. Buy more to continue."
                         ),
                         "credits_cents": 0,
+                        "tier": tier,
+                    },
+                )
+    else:
+        # Pro/Team: personal daily limit check
+        if user:
+            usage = _get_user_daily_usage(user)
+            if usage >= tier_config['daily_limit_cents']:
+                raise HTTPException(
+                    status_code=402,
+                    detail={
+                        "code": "DAILY_LIMIT_EXCEEDED",
+                        "message": f"Your {tier} daily limit (${tier_config['daily_limit_cents'] / 100:.0f}/day) has been reached.",
+                        "tier": tier,
+                        "limit_cents": tier_config['daily_limit_cents'],
+                        "used_cents": usage,
                     },
                 )
 
@@ -586,18 +773,41 @@ async def ai_chat(req: AIChatRequest, db: Session = Depends(get_db)):
             total_tokens = usage.get("total_tokens", 200)
             _add_daily_cost(total_tokens)
 
-            # Deduct per-user credits (members are exempt)
             credits_remaining = None
-            if not is_member and user is not None:
-                cost = _calc_user_cost_cents(total_tokens)
-                try:
-                    user.credits_cents = max(0, (getattr(user, "credits_cents", 0) or 0) - cost)
-                    db.commit()
-                    credits_remaining = user.credits_cents
-                except Exception as e:
-                    logging.error(f"Credits deduction error: {e}")
+            daily_usage = None
 
-            return {"content": content, "credits_cents": credits_remaining}
+            if tier == 'free':
+                # Deduct per-user credits
+                if user is not None:
+                    cost = _calc_user_cost_cents(total_tokens)
+                    try:
+                        user.credits_cents = max(0, (getattr(user, "credits_cents", 0) or 0) - cost)
+                        db.commit()
+                        credits_remaining = user.credits_cents
+                    except Exception as e:
+                        logging.error(f"Credits deduction error: {e}")
+            else:
+                # Pro/Team: track personal daily usage
+                if user is not None:
+                    cost_cents = _calc_user_cost_cents(total_tokens)
+                    today = _today()
+                    try:
+                        if getattr(user, 'daily_ai_usage_date', None) != today:
+                            user.daily_ai_usage_cents = cost_cents
+                            user.daily_ai_usage_date = today
+                        else:
+                            user.daily_ai_usage_cents = (user.daily_ai_usage_cents or 0) + cost_cents
+                        db.commit()
+                        daily_usage = user.daily_ai_usage_cents
+                    except Exception as e:
+                        logging.error(f"Daily usage tracking error: {e}")
+
+            return {
+                "content": content,
+                "credits_cents": credits_remaining,
+                "tier": tier,
+                "daily_usage_cents": daily_usage,
+            }
     except httpx.TimeoutException:
         raise HTTPException(status_code=504, detail="AI request timed out.")
     except httpx.RequestError as e:
@@ -613,7 +823,8 @@ class AuthLoginRequest(BaseModel):
 
 
 @app.post("/auth/login")
-async def auth_login(req: AuthLoginRequest, db: Session = Depends(get_db)):
+@limiter.limit("5/minute")
+async def auth_login(request: Request, req: AuthLoginRequest, db: Session = Depends(get_db)):
     """Exchange an Auth0 ID token for a chat user_id. Creates the user on first login."""
     payload = await verify_id_token(req.token)
     sub = payload.get("sub")  # e.g. "auth0|abc123" or "google-oauth2|123"
@@ -649,12 +860,15 @@ async def auth_login(req: AuthLoginRequest, db: Session = Depends(get_db)):
             db.add(user)
             db.commit()
             db.refresh(user)
+        tier = _get_effective_tier(user)
         return {
             "user_id": user.user_id,
             "username": user.username,
-            "is_member": user.is_member,
+            "is_member": tier != 'free',
             "credits_cents": user.credits_cents or 0,
             "is_anonymous": False,
+            "tier": tier,
+            "billing": getattr(user, 'membership_billing', None),
         }
     except (OperationalError, SQLAlchemyError) as e:
         logging.error(f"DB error in auth_login: {e}")
@@ -771,6 +985,64 @@ async def add_group_member(group_id: str, req: AddMemberRequest, db: Session = D
         raise HTTPException(status_code=503, detail="Database unavailable.")
 
 
+@app.delete("/groups/{group_id}/members/{member_id}")
+async def remove_group_member(
+    group_id: str,
+    member_id: str,
+    user_id: str,
+    db: Session = Depends(get_db),
+):
+    """Remove a member from a group. Only the group creator can do this."""
+    try:
+        group = db.query(Group).filter(Group.group_id == group_id).first()
+        if not group:
+            raise HTTPException(status_code=404, detail="Group not found")
+
+        if group.created_by != user_id:
+            raise HTTPException(status_code=403, detail="Only the group creator can remove members")
+
+        if member_id == group.created_by:
+            raise HTTPException(status_code=400, detail="Cannot remove the group creator")
+
+        membership = db.query(GroupMember).filter(
+            GroupMember.group_id == group_id, GroupMember.user_id == member_id
+        ).first()
+        if not membership:
+            raise HTTPException(status_code=404, detail="Member not found in group")
+
+        db.delete(membership)
+        db.commit()
+
+        # Build updated group data
+        remaining = db.query(GroupMember).filter(GroupMember.group_id == group_id).all()
+        group_data = {
+            "group_id": group_id,
+            "name": group.name,
+            "icon": group.icon,
+            "created_by": group.created_by,
+            "members": [m.user_id for m in remaining],
+        }
+
+        # Notify remaining members
+        for m in remaining:
+            await manager.send_personal_message(
+                {"type": "group_updated", "group": group_data}, m.user_id
+            )
+
+        # Notify the kicked member
+        await manager.send_personal_message(
+            {"type": "group_kicked", "group_id": group_id, "kicked_by": user_id},
+            member_id,
+        )
+
+        return group_data
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.error(f"Error removing member from group: {e}")
+        raise HTTPException(status_code=503, detail="Database unavailable.")
+
+
 # ── Message history ───────────────────────────────────────────────────────────
 
 @app.get("/messages/{conversation_id}")
@@ -844,10 +1116,13 @@ async def get_user_credits(user_id: str, db: Session = Depends(get_db)):
         user = db.query(User).filter(User.user_id == user_id).first()
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
+        tier = _get_effective_tier(user)
         return {
             "credits_cents": getattr(user, "credits_cents", 0) or 0,
-            "is_member": bool(user.is_member),
+            "is_member": tier != 'free',
             "is_anonymous": not bool(user.auth0_sub),
+            "tier": tier,
+            "billing": getattr(user, "membership_billing", None),
         }
     except HTTPException:
         raise
@@ -862,7 +1137,8 @@ class BuyCreditsRequest(BaseModel):
 
 
 @app.post("/stripe/buy-credits")
-async def buy_credits(req: BuyCreditsRequest, request: Request):
+@limiter.limit("5/minute")
+async def buy_credits(request: Request, req: BuyCreditsRequest):
     """Create a Stripe one-time Checkout session to top up AI credits."""
     stripe_key = os.getenv("STRIPE_SECRET_KEY", "")
     if not stripe_key:
@@ -895,9 +1171,59 @@ async def buy_credits(req: BuyCreditsRequest, request: Request):
         raise HTTPException(status_code=502, detail="Payment service error.")
 
 
+class SubscriptionCheckoutRequest(BaseModel):
+    user_id: str
+    tier: str = 'pro'
+    billing: str = 'monthly'
+
+
+@app.post("/stripe/subscribe")
+@limiter.limit("5/minute")
+async def create_subscription_checkout(request: Request, req: SubscriptionCheckoutRequest, db: Session = Depends(get_db)):
+    """Create a Stripe Checkout session for a subscription plan."""
+    stripe_key = os.getenv("STRIPE_SECRET_KEY", "")
+    if not stripe_key:
+        raise HTTPException(status_code=503, detail="Payment not configured.")
+
+    if req.tier not in ('pro', 'team') or req.billing not in ('monthly', 'yearly'):
+        raise HTTPException(status_code=400, detail="Invalid tier or billing cycle.")
+
+    price_key = f"{req.tier}_{req.billing}"
+    price_id = STRIPE_PRICES.get(price_key)
+    if not price_id:
+        raise HTTPException(status_code=400, detail=f"Price not configured for {req.tier}/{req.billing}.")
+
+    stripe.api_key = stripe_key
+    origin = request.headers.get("origin", "https://chat.jytech.us")
+
+    user = db.query(User).filter(User.user_id == req.user_id).first()
+    customer_id = getattr(user, 'stripe_customer_id', None) if user else None
+
+    checkout_params = {
+        "payment_method_types": ["card"],
+        "line_items": [{"price": price_id, "quantity": 1}],
+        "mode": "subscription",
+        "metadata": {"user_id": req.user_id, "tier": req.tier, "billing": req.billing},
+        "success_url": f"{origin}?membership=success&tier={req.tier}",
+        "cancel_url": f"{origin}?membership=cancelled",
+    }
+    if customer_id:
+        checkout_params["customer"] = customer_id
+    else:
+        checkout_params["customer_creation"] = "always"
+
+    try:
+        session = stripe.checkout.Session.create(**checkout_params)
+        return {"checkout_url": session.url}
+    except stripe.StripeError as e:
+        logging.error(f"Stripe subscription error: {e}")
+        raise HTTPException(status_code=502, detail="Payment service error.")
+
+
 @app.post("/stripe/checkout")
+@limiter.limit("5/minute")
 async def create_checkout(request: Request):
-    """Create a Stripe Checkout session for membership upgrade."""
+    """Legacy endpoint — redirects to /stripe/subscribe with pro/monthly defaults."""
     stripe_key = os.getenv("STRIPE_SECRET_KEY", "")
     price_id = os.getenv("STRIPE_PRICE_ID", "")
     if not stripe_key or not price_id:
@@ -913,14 +1239,84 @@ async def create_checkout(request: Request):
             payment_method_types=["card"],
             line_items=[{"price": price_id, "quantity": 1}],
             mode="subscription",
-            metadata={"user_id": user_id},
-            success_url=f"{origin}?membership=success",
+            metadata={"user_id": user_id, "tier": "pro", "billing": "monthly"},
+            success_url=f"{origin}?membership=success&tier=pro",
             cancel_url=f"{origin}?membership=cancelled",
         )
         return {"checkout_url": session.url}
     except stripe.StripeError as e:
         logging.error(f"Stripe error: {e}")
         raise HTTPException(status_code=502, detail="Payment service error.")
+
+
+@app.post("/stripe/manage")
+@limiter.limit("5/minute")
+async def create_customer_portal(request: Request, db: Session = Depends(get_db)):
+    """Create a Stripe Customer Portal session for managing subscription."""
+    stripe_key = os.getenv("STRIPE_SECRET_KEY", "")
+    if not stripe_key:
+        raise HTTPException(status_code=503, detail="Payment not configured.")
+
+    body = await request.json()
+    user_id = body.get("user_id", "")
+    user = db.query(User).filter(User.user_id == user_id).first()
+    if not user or not getattr(user, 'stripe_customer_id', None):
+        raise HTTPException(status_code=404, detail="No subscription found.")
+
+    stripe.api_key = stripe_key
+    origin = request.headers.get("origin", "https://chat.jytech.us")
+
+    try:
+        session = stripe.billing_portal.Session.create(
+            customer=user.stripe_customer_id,
+            return_url=origin,
+        )
+        return {"portal_url": session.url}
+    except stripe.StripeError as e:
+        logging.error(f"Stripe portal error: {e}")
+        raise HTTPException(status_code=502, detail="Payment service error.")
+
+
+@app.get("/user/{user_id}/subscription")
+async def get_user_subscription(user_id: str, db: Session = Depends(get_db)):
+    """Return a user's subscription details."""
+    user = db.query(User).filter(User.user_id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    tier = _get_effective_tier(user)
+    tier_config = TIER_CONFIG[tier]
+
+    return {
+        "tier": tier,
+        "billing": getattr(user, 'membership_billing', None),
+        "expires_at": getattr(user, 'membership_expires_at', None).isoformat() if getattr(user, 'membership_expires_at', None) else None,
+        "daily_limit_cents": tier_config['daily_limit_cents'],
+        "daily_usage_cents": _get_user_daily_usage(user) if tier != 'free' else None,
+        "rate_limit_per_min": tier_config['rate_limit'],
+        "max_message_chars": tier_config['max_chars'],
+        "credits_cents": getattr(user, 'credits_cents', 0) or 0,
+        "is_member": tier != 'free',
+    }
+
+
+# ── Webhook idempotency ────────────────────────────────────────────────────
+_processed_events: dict[str, datetime] = {}
+_EVENT_TTL_HOURS = 24
+
+
+def _is_duplicate_event(event_id: str) -> bool:
+    """Check if a webhook event was already processed (24h window)."""
+    now = datetime.utcnow()
+    # Prune stale entries
+    cutoff = now - timedelta(hours=_EVENT_TTL_HOURS)
+    for eid in list(_processed_events.keys()):
+        if _processed_events[eid] < cutoff:
+            del _processed_events[eid]
+    if event_id in _processed_events:
+        return True
+    _processed_events[event_id] = now
+    return False
 
 
 @app.post("/stripe/webhook")
@@ -937,9 +1333,16 @@ async def stripe_webhook(request: Request, db: Session = Depends(get_db)):
     except stripe.SignatureVerificationError:
         raise HTTPException(status_code=400, detail="Invalid signature")
 
-    if event["type"] == "checkout.session.completed":
+    # Idempotency: skip already-processed events
+    event_id = event.get("id", "")
+    if event_id and _is_duplicate_event(event_id):
+        logging.info(f"Skipping duplicate webhook event {event_id}")
+        return {"received": True, "duplicate": True}
+
+    event_type = event["type"]
+
+    if event_type == "checkout.session.completed":
         session_obj = event["data"]["object"]
-        # Verify payment actually succeeded
         if session_obj.get("payment_status") != "paid":
             logging.warning(f"Checkout completed but payment_status={session_obj.get('payment_status')}")
             return {"received": True}
@@ -947,6 +1350,8 @@ async def stripe_webhook(request: Request, db: Session = Depends(get_db)):
         meta = session_obj.get("metadata") or {}
         user_id = meta.get("user_id")
         credit_cents_str = meta.get("credit_cents")
+        tier = meta.get("tier")
+        billing = meta.get("billing")
         stripe_session_id = session_obj.get("id", "")
 
         if user_id:
@@ -957,12 +1362,69 @@ async def stripe_webhook(request: Request, db: Session = Depends(get_db)):
                         add = int(credit_cents_str)
                         user.credits_cents = (getattr(user, "credits_cents", 0) or 0) + add
                         logging.info(f"Added {add} credit cents to user {user_id} (session {stripe_session_id})")
-                    else:
+                    elif tier:
+                        user.membership_tier = tier
+                        user.membership_billing = billing
                         user.is_member = True
-                        logging.info(f"Membership granted to user {user_id} (session {stripe_session_id})")
+                        user.stripe_customer_id = session_obj.get("customer")
+                        user.stripe_subscription_id = session_obj.get("subscription")
+                        if billing == 'yearly':
+                            user.membership_expires_at = datetime.utcnow() + timedelta(days=366)
+                        else:
+                            user.membership_expires_at = datetime.utcnow() + timedelta(days=32)
+                        logging.info(f"Subscription {tier}/{billing} granted to user {user_id}")
+                    else:
+                        # Legacy single-membership
+                        user.is_member = True
+                        user.membership_tier = 'pro'
+                        logging.info(f"Legacy membership granted to user {user_id}")
                     db.commit()
             except Exception as e:
                 logging.error(f"DB error processing payment for {user_id}: {e}")
+
+    elif event_type == "customer.subscription.updated":
+        sub = event["data"]["object"]
+        customer_id = sub.get("customer")
+        try:
+            user = db.query(User).filter(User.stripe_customer_id == customer_id).first()
+            if user:
+                items = sub.get("items", {}).get("data", [])
+                if items:
+                    price_id = items[0].get("price", {}).get("id", "")
+                    tier_info = PRICE_TO_TIER.get(price_id)
+                    if tier_info:
+                        user.membership_tier = tier_info[0]
+                        user.membership_billing = tier_info[1]
+                        user.is_member = True
+                period_end = sub.get("current_period_end")
+                if period_end:
+                    user.membership_expires_at = datetime.utcfromtimestamp(period_end)
+                if sub.get("cancel_at_period_end"):
+                    logging.info(f"Subscription cancel scheduled for customer {customer_id}")
+                db.commit()
+        except Exception as e:
+            logging.error(f"Error updating subscription for customer {customer_id}: {e}")
+
+    elif event_type == "customer.subscription.deleted":
+        sub = event["data"]["object"]
+        customer_id = sub.get("customer")
+        try:
+            user = db.query(User).filter(User.stripe_customer_id == customer_id).first()
+            if user:
+                user.membership_tier = 'free'
+                user.is_member = False
+                user.membership_billing = None
+                user.stripe_subscription_id = None
+                user.membership_expires_at = None
+                db.commit()
+                logging.info(f"Subscription cancelled for customer {customer_id}, user {user.user_id}")
+        except Exception as e:
+            logging.error(f"Error cancelling subscription for customer {customer_id}: {e}")
+
+    elif event_type == "invoice.payment_failed":
+        invoice = event["data"]["object"]
+        customer_id = invoice.get("customer")
+        logging.warning(f"Payment failed for customer {customer_id} — Stripe will retry automatically.")
 
     return {"received": True}
 

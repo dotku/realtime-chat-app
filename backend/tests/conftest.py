@@ -22,6 +22,10 @@ from httpx import AsyncClient, ASGITransport
 
 from database import Base, User, Group, GroupMember, ChatMessage
 from main import app, get_db  # get_db is imported from database but used via Depends
+from rate_limiter import limiter
+
+# Disable rate limiting in tests
+limiter.enabled = False
 
 
 # ---------------------------------------------------------------------------

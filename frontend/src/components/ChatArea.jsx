@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import ProviderLogo from './ProviderLogo';
@@ -8,7 +9,10 @@ export default function ChatArea({
   handleFileSelect, mentionCandidates, applyMention,
   pendingMentionUsers, setPendingMentionUsers, messagesEndRef,
   loadOlderMessages, loadingOlder, hasMoreMessages, makeConversationId,
+  onKickMember, onlineUsers,
 }) {
+  const [showMembers, setShowMembers] = useState(false);
+
   if (!selectedUser) {
     return (
       <div className="chat-container">
@@ -19,6 +23,15 @@ export default function ChatArea({
       </div>
     );
   }
+
+  const isGroupCreator = selectedUser.type === 'group' && selectedUser.created_by === userId;
+
+  // Resolve member names from onlineUsers list
+  const getMemberName = (memberId) => {
+    if (memberId === userId) return 'You';
+    const u = onlineUsers?.find(u => u.user_id === memberId);
+    return u?.username || memberId.slice(0, 8) + '...';
+  };
 
   return (
     <div className="chat-container">
@@ -37,7 +50,9 @@ export default function ChatArea({
             <div className="chat-username">{selectedUser.username}</div>
             <div className="chat-status">
               {selectedUser.type === 'group' ? (
-                <><span className="group-dot"></span> {selectedUser.members?.length || 0} members</>
+                <span className="group-members-toggle" onClick={() => setShowMembers(prev => !prev)}>
+                  <span className="group-dot"></span> {selectedUser.members?.length || 0} members {showMembers ? '▴' : '▾'}
+                </span>
               ) : selectedUser.type === 'ai' || selectedUser.type === 'agent' ? (
                 <><span className="ai-dot"></span> {selectedUser.model}</>
               ) : (
@@ -47,6 +62,28 @@ export default function ChatArea({
           </div>
         </div>
       </div>
+
+      {/* Group member panel */}
+      {selectedUser.type === 'group' && showMembers && (
+        <div className="group-member-panel">
+          {selectedUser.members?.map(memberId => (
+            <div key={memberId} className="group-member-row">
+              <span className="group-member-avatar">{getMemberName(memberId).charAt(0).toUpperCase()}</span>
+              <span className="group-member-name">
+                {getMemberName(memberId)}
+                {memberId === selectedUser.created_by && <span className="group-owner-badge">Owner</span>}
+              </span>
+              {isGroupCreator && memberId !== userId && (
+                <button
+                  className="group-kick-btn"
+                  onClick={() => { if (confirm(`Remove ${getMemberName(memberId)} from this group?`)) onKickMember(selectedUser.user_id, memberId); }}
+                  title="Remove from group"
+                >✕</button>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
 
       <div className="messages-container">
         {loadOlderMessages && selectedUser && (() => {

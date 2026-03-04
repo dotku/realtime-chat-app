@@ -1,7 +1,10 @@
 from fastapi import WebSocket
 from typing import Dict, Set
+from collections import defaultdict
 import uuid
 from datetime import datetime
+
+MAX_CONNECTIONS_PER_IP = 10
 
 
 class ConnectionManager:
@@ -12,14 +15,25 @@ class ConnectionManager:
         self.user_names: Dict[str, str] = {}
         # Track active chat sessions: {user_id: set of user_ids they're chatting with}
         self.active_chats: Dict[str, Set[str]] = {}
+        # Track connections per IP for rate limiting
+        self._ip_connections: Dict[str, int] = defaultdict(int)
+        # Maps user_id to IP for cleanup on disconnect
+        self._user_ips: Dict[str, str] = {}
 
-    async def connect(self, websocket: WebSocket, user_id: str, username: str):
+    def check_ip_limit(self, client_ip: str) -> bool:
+        """Return True if the IP is within connection limits."""
+        return self._ip_connections[client_ip] < MAX_CONNECTIONS_PER_IP
+
+    async def connect(self, websocket: WebSocket, user_id: str, username: str, client_ip: str = ""):
         # Always accept the WebSocket connection
         await websocket.accept()
 
         self.active_connections[user_id] = websocket
         self.user_names[user_id] = username
         self.active_chats[user_id] = set()
+        if client_ip:
+            self._ip_connections[client_ip] += 1
+            self._user_ips[user_id] = client_ip
 
     def disconnect(self, user_id: str):
         if user_id in self.active_connections:
@@ -28,6 +42,12 @@ class ConnectionManager:
             del self.user_names[user_id]
         if user_id in self.active_chats:
             del self.active_chats[user_id]
+        # Decrement IP counter
+        ip = self._user_ips.pop(user_id, None)
+        if ip and self._ip_connections[ip] > 0:
+            self._ip_connections[ip] -= 1
+            if self._ip_connections[ip] == 0:
+                del self._ip_connections[ip]
 
     async def send_personal_message(self, message: dict, user_id: str):
         if user_id in self.active_connections:

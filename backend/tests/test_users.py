@@ -15,9 +15,9 @@ async def test_create_user(client):
 
 @pytest.mark.asyncio
 async def test_create_user_empty_name(client):
-    """Empty username should still succeed (server doesn't validate length yet)."""
+    """Empty username should be rejected by min_length=1 validation."""
     resp = await client.post("/users", json={"username": ""})
-    assert resp.status_code == 200
+    assert resp.status_code == 422
 
 
 @pytest.mark.asyncio

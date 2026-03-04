@@ -918,6 +918,85 @@ body {
   font-weight: 600;
 }
 
+/* Group member toggle + panel */
+.group-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #6c63ff;
+  margin-right: 4px;
+}
+
+.group-members-toggle {
+  cursor: pointer;
+  user-select: none;
+  color: #aaa;
+  font-size: 0.8rem;
+}
+.group-members-toggle:hover {
+  color: #fff;
+}
+
+.group-member-panel {
+  background: #1e1e2e;
+  border-bottom: 1px solid #333;
+  padding: 8px 16px;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.group-member-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 0;
+}
+
+.group-member-avatar {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: #6c63ff;
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.75rem;
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+.group-member-name {
+  flex: 1;
+  font-size: 0.85rem;
+  color: #ddd;
+}
+
+.group-owner-badge {
+  font-size: 0.65rem;
+  background: #6c63ff33;
+  color: #a29bfe;
+  padding: 1px 6px;
+  border-radius: 8px;
+  margin-left: 6px;
+}
+
+.group-kick-btn {
+  background: none;
+  border: none;
+  color: #666;
+  cursor: pointer;
+  font-size: 1rem;
+  padding: 2px 6px;
+  border-radius: 4px;
+  line-height: 1;
+}
+.group-kick-btn:hover {
+  color: #ff4757;
+  background: #ff475720;
+}
+
 /* Icon picker (shared by group + agent forms) */
 .icon-picker {
   display: flex;
