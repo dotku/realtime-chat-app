@@ -14,7 +14,8 @@ import stripe
 from jose import jwt as jose_jwt, JWTError
 
 from pydantic import BaseModel
-from database import init_db, get_db, User, Group, GroupMember, engine
+from typing import Optional
+from database import init_db, get_db, User, Group, GroupMember, ChatMessage, make_conversation_id, engine
 from models import UserCreate, UserResponse, GroupCreate, GroupResponse, Message
 from connection_manager import manager
 
@@ -118,6 +119,34 @@ async def startup_event():
             conn.execute(text(
                 "ALTER TABLE users ADD COLUMN IF NOT EXISTS credits_cents INTEGER DEFAULT 100"
             ))
+            # Ensure messages table and indexes exist
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS messages (
+                    id SERIAL PRIMARY KEY,
+                    message_id VARCHAR NOT NULL UNIQUE,
+                    conversation_id VARCHAR NOT NULL,
+                    from_user VARCHAR NOT NULL,
+                    from_username VARCHAR NOT NULL,
+                    to_user VARCHAR NOT NULL,
+                    group_id VARCHAR,
+                    content TEXT NOT NULL DEFAULT '',
+                    timestamp TIMESTAMP NOT NULL,
+                    has_attachment BOOLEAN DEFAULT FALSE,
+                    attachment_type VARCHAR,
+                    attachment_name VARCHAR,
+                    attachment_size INTEGER,
+                    created_at TIMESTAMP DEFAULT NOW()
+                )
+            """))
+            conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_messages_conversation_ts ON messages (conversation_id, timestamp DESC)"
+            ))
+            conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_messages_to_user_ts ON messages (to_user, timestamp)"
+            ))
+            conn.execute(text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS ix_messages_message_id ON messages (message_id)"
+            ))
             conn.commit()
         logging.info("Database initialized successfully")
     except Exception as e:
@@ -188,6 +217,34 @@ async def get_online_users(db: Session = Depends(get_db)):
             status_code=503,
             detail="Database unavailable. Please try again later."
         )
+
+
+def persist_message(db: Session, message: dict):
+    """Save a chat message to the database. Non-blocking — logs errors but doesn't raise."""
+    try:
+        attachment = message.get("attachment")
+        attachment_size = len(attachment["data"]) if attachment and attachment.get("data") else None
+        db_msg = ChatMessage(
+            message_id=message["message_id"],
+            conversation_id=make_conversation_id(
+                message["from_user"], message["to_user"], message.get("group_id")
+            ),
+            from_user=message["from_user"],
+            from_username=message["from_username"],
+            to_user=message["to_user"],
+            group_id=message.get("group_id"),
+            content=message.get("content", ""),
+            timestamp=datetime.fromisoformat(message["timestamp"]),
+            has_attachment=bool(attachment),
+            attachment_type=attachment.get("type") if attachment else None,
+            attachment_name=attachment.get("name") if attachment else None,
+            attachment_size=attachment_size,
+        )
+        db.add(db_msg)
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        logging.error(f"Failed to persist message {message.get('message_id')}: {e}")
 
 
 @app.websocket("/ws/{user_id}")
@@ -295,6 +352,7 @@ async def websocket_endpoint(
                 to_user = message_data.get("to_user")
                 content = message_data.get("content", "")
                 attachment = message_data.get("attachment")  # optional file attachment
+                message_id = str(uuid.uuid4())
                 logging.info(f"Received chat message to {to_user}, has_attachment={attachment is not None}")
 
                 if to_user and to_user.startswith("group:"):
@@ -305,17 +363,72 @@ async def websocket_endpoint(
                         ).all()
                         member_ids = [m.user_id for m in members]
                         if user_id in member_ids:
-                            await manager.send_group_message(
-                                user_id, to_user, member_ids, content, attachment
+                            msg = await manager.send_group_message(
+                                user_id, to_user, member_ids, content, attachment,
+                                message_id=message_id
                             )
+                            persist_message(db, msg)
                         else:
                             logging.warning(f"User {user_id} not a member of {to_user}")
                     except Exception as e:
                         logging.error(f"Error sending group message: {e}")
                 elif to_user and (content or attachment):
-                    await manager.send_chat_message(user_id, to_user, content, attachment)
+                    msg = await manager.send_chat_message(
+                        user_id, to_user, content, attachment, message_id=message_id
+                    )
+                    persist_message(db, msg)
                 else:
                     logging.warning(f"Invalid chat message: missing to_user or content/attachment")
+
+            # Handle sync request — deliver missed messages from DB
+            elif message_data.get("type") == "sync":
+                last_timestamp = message_data.get("last_timestamp")
+                try:
+                    query = db.query(ChatMessage).filter(
+                        ChatMessage.to_user == user_id,
+                    )
+                    if last_timestamp:
+                        query = query.filter(
+                            ChatMessage.timestamp > datetime.fromisoformat(last_timestamp)
+                        )
+                    else:
+                        # New device — send last 50 messages
+                        query = query.order_by(ChatMessage.timestamp.desc()).limit(50)
+                        results = query.all()
+                        results.reverse()
+                        for msg in results:
+                            await manager.send_personal_message({
+                                "type": "chat",
+                                "message_id": msg.message_id,
+                                "from_user": msg.from_user,
+                                "from_username": msg.from_username,
+                                "to_user": msg.to_user,
+                                "group_id": msg.group_id,
+                                "content": msg.content,
+                                "timestamp": msg.timestamp.isoformat(),
+                                "has_attachment": msg.has_attachment,
+                                "attachment_type": msg.attachment_type,
+                                "attachment_name": msg.attachment_name,
+                            }, user_id)
+                        continue
+
+                    missed = query.order_by(ChatMessage.timestamp.asc()).limit(200).all()
+                    for msg in missed:
+                        await manager.send_personal_message({
+                            "type": "chat",
+                            "message_id": msg.message_id,
+                            "from_user": msg.from_user,
+                            "from_username": msg.from_username,
+                            "to_user": msg.to_user,
+                            "group_id": msg.group_id,
+                            "content": msg.content,
+                            "timestamp": msg.timestamp.isoformat(),
+                            "has_attachment": msg.has_attachment,
+                            "attachment_type": msg.attachment_type,
+                            "attachment_name": msg.attachment_name,
+                        }, user_id)
+                except Exception as e:
+                    logging.error(f"Error syncing messages for {user_id}: {e}")
 
     except WebSocketDisconnect:
         # Handle disconnection
@@ -655,6 +768,70 @@ async def add_group_member(group_id: str, req: AddMemberRequest, db: Session = D
         raise
     except Exception as e:
         logging.error(f"Error adding member to group: {e}")
+        raise HTTPException(status_code=503, detail="Database unavailable.")
+
+
+# ── Message history ───────────────────────────────────────────────────────────
+
+@app.get("/messages/{conversation_id}")
+async def get_messages(
+    conversation_id: str,
+    user_id: str,
+    before: Optional[str] = None,
+    limit: int = 50,
+    db: Session = Depends(get_db),
+):
+    """Fetch paginated message history for a conversation (cursor-based)."""
+    limit = min(limit, 100)
+
+    # Authorization: user must be part of the conversation
+    if conversation_id.startswith("dm:"):
+        if user_id not in conversation_id:
+            raise HTTPException(status_code=403, detail="Not authorized")
+    elif conversation_id.startswith("group:"):
+        member = db.query(GroupMember).filter(
+            GroupMember.group_id == conversation_id,
+            GroupMember.user_id == user_id,
+        ).first()
+        if not member:
+            raise HTTPException(status_code=403, detail="Not authorized")
+
+    try:
+        query = db.query(ChatMessage).filter(
+            ChatMessage.conversation_id == conversation_id
+        )
+        if before:
+            query = query.filter(ChatMessage.timestamp < datetime.fromisoformat(before))
+
+        results = query.order_by(ChatMessage.timestamp.desc()).limit(limit + 1).all()
+        has_more = len(results) > limit
+        messages = results[:limit]
+        messages.reverse()  # chronological order
+
+        return {
+            "messages": [
+                {
+                    "message_id": m.message_id,
+                    "conversation_id": m.conversation_id,
+                    "from_user": m.from_user,
+                    "from_username": m.from_username,
+                    "to_user": m.to_user,
+                    "group_id": m.group_id,
+                    "content": m.content,
+                    "timestamp": m.timestamp.isoformat(),
+                    "has_attachment": m.has_attachment,
+                    "attachment_type": m.attachment_type,
+                    "attachment_name": m.attachment_name,
+                }
+                for m in messages
+            ],
+            "has_more": has_more,
+            "oldest_timestamp": messages[0].timestamp.isoformat() if messages else None,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.error(f"Error fetching messages for {conversation_id}: {e}")
         raise HTTPException(status_code=503, detail="Database unavailable.")
 
 

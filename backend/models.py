@@ -1,6 +1,6 @@
 from pydantic import BaseModel
 from datetime import datetime
-from typing import Optional
+from typing import Optional, List
 
 
 class UserCreate(BaseModel):
@@ -42,3 +42,26 @@ class Message(BaseModel):
     content: Optional[str] = None
     timestamp: Optional[datetime] = None
     users: Optional[list] = None
+
+
+class MessageResponse(BaseModel):
+    message_id: str
+    conversation_id: str
+    from_user: str
+    from_username: str
+    to_user: str
+    group_id: Optional[str] = None
+    content: str
+    timestamp: datetime
+    has_attachment: bool = False
+    attachment_type: Optional[str] = None
+    attachment_name: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+
+class MessageHistoryResponse(BaseModel):
+    messages: List[MessageResponse]
+    has_more: bool
+    oldest_timestamp: Optional[datetime] = None

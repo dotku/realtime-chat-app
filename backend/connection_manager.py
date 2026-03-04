@@ -1,12 +1,10 @@
 from fastapi import WebSocket
-from typing import Dict, Set, List
-import json
+from typing import Dict, Set
+import uuid
 from datetime import datetime
 
 
 class ConnectionManager:
-    MAX_PENDING_MESSAGES = 50  # Maximum messages to queue per user
-
     def __init__(self):
         # Maps user_id to WebSocket connection
         self.active_connections: Dict[str, WebSocket] = {}
@@ -14,8 +12,6 @@ class ConnectionManager:
         self.user_names: Dict[str, str] = {}
         # Track active chat sessions: {user_id: set of user_ids they're chatting with}
         self.active_chats: Dict[str, Set[str]] = {}
-        # Message queue for offline users: {user_id: [messages]}
-        self.pending_messages: Dict[str, List[dict]] = {}
 
     async def connect(self, websocket: WebSocket, user_id: str, username: str):
         # Always accept the WebSocket connection
@@ -24,14 +20,6 @@ class ConnectionManager:
         self.active_connections[user_id] = websocket
         self.user_names[user_id] = username
         self.active_chats[user_id] = set()
-
-        # Send any pending messages to this user
-        if user_id in self.pending_messages:
-            print(f"Delivering {len(self.pending_messages[user_id])} pending messages to {user_id}")
-            for message in self.pending_messages[user_id]:
-                await self.send_personal_message(message, user_id)
-            # Clear pending messages after delivery
-            del self.pending_messages[user_id]
 
     def disconnect(self, user_id: str):
         if user_id in self.active_connections:
@@ -48,23 +36,7 @@ class ConnectionManager:
                 await websocket.send_json(message)
             except Exception as e:
                 print(f"Error sending message to {user_id}: {e}")
-        else:
-            # Queue message if it's a chat message and user is not connected
-            if message.get("type") == "chat":
-                print(f"User {user_id} not connected, queuing message")
-                if user_id not in self.pending_messages:
-                    self.pending_messages[user_id] = []
-
-                # Add message to queue with limit
-                if len(self.pending_messages[user_id]) < self.MAX_PENDING_MESSAGES:
-                    self.pending_messages[user_id].append(message)
-                else:
-                    # Remove oldest message and add new one (FIFO)
-                    self.pending_messages[user_id].pop(0)
-                    self.pending_messages[user_id].append(message)
-                    print(f"Message queue full for {user_id}, removed oldest message")
-            else:
-                print(f"User {user_id} not in active connections")
+        # Offline users will receive missed messages via DB sync on reconnect
 
     async def broadcast(self, message: dict, exclude: str = None):
         """Broadcast message to all connected users except the excluded one"""
@@ -75,10 +47,12 @@ class ConnectionManager:
                 except Exception as e:
                     print(f"Error broadcasting to {user_id}: {e}")
 
-    async def send_chat_message(self, from_user: str, to_user: str, content: str, attachment: dict = None):
-        """Send a chat message between two users"""
+    async def send_chat_message(self, from_user: str, to_user: str, content: str,
+                                attachment: dict = None, message_id: str = None):
+        """Send a chat message between two users. Returns the full message dict."""
         message = {
             "type": "chat",
+            "message_id": message_id or str(uuid.uuid4()),
             "from_user": from_user,
             "from_username": self.user_names.get(from_user, "Unknown"),
             "to_user": to_user,
@@ -95,12 +69,15 @@ class ConnectionManager:
         await self.send_personal_message(message, from_user)
         await self.send_personal_message(message, to_user)
 
+        return message
+
     async def send_group_message(self, from_user: str, group_id: str,
                                    member_ids: list, content: str,
-                                   attachment: dict = None):
-        """Send a chat message to all members of a group."""
+                                   attachment: dict = None, message_id: str = None):
+        """Send a chat message to all members of a group. Returns the full message dict."""
         message = {
             "type": "chat",
+            "message_id": message_id or str(uuid.uuid4()),
             "from_user": from_user,
             "from_username": self.user_names.get(from_user, "Unknown"),
             "to_user": group_id,
@@ -113,6 +90,8 @@ class ConnectionManager:
 
         for member_id in member_ids:
             await self.send_personal_message(message, member_id)
+
+        return message
 
     def get_online_users(self):
         """Get list of all online users"""
