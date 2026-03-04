@@ -14,8 +14,8 @@ import stripe
 from jose import jwt as jose_jwt, JWTError
 
 from pydantic import BaseModel
-from database import init_db, get_db, User, engine
-from models import UserCreate, UserResponse, Message
+from database import init_db, get_db, User, Group, GroupMember, engine
+from models import UserCreate, UserResponse, GroupCreate, GroupResponse, Message
 from connection_manager import manager
 
 logging.basicConfig(level=logging.INFO)
@@ -262,6 +262,28 @@ async def websocket_endpoint(
         }
     )
 
+    # Send user's groups
+    try:
+        memberships = db.query(GroupMember).filter(GroupMember.user_id == user_id).all()
+        group_ids = [m.group_id for m in memberships]
+        if group_ids:
+            groups = db.query(Group).filter(Group.group_id.in_(group_ids)).all()
+            groups_data = []
+            for g in groups:
+                members = db.query(GroupMember).filter(GroupMember.group_id == g.group_id).all()
+                groups_data.append({
+                    "group_id": g.group_id,
+                    "name": g.name,
+                    "icon": g.icon,
+                    "created_by": g.created_by,
+                    "members": [m.user_id for m in members],
+                })
+            await manager.send_personal_message(
+                {"type": "user_groups", "groups": groups_data}, user_id
+            )
+    except Exception as e:
+        logging.error(f"Error loading groups for {user_id}: {e}")
+
     try:
         while True:
             # Receive message from client
@@ -275,7 +297,22 @@ async def websocket_endpoint(
                 attachment = message_data.get("attachment")  # optional file attachment
                 logging.info(f"Received chat message to {to_user}, has_attachment={attachment is not None}")
 
-                if to_user and (content or attachment):
+                if to_user and to_user.startswith("group:"):
+                    # Group message — fan out to all members
+                    try:
+                        members = db.query(GroupMember).filter(
+                            GroupMember.group_id == to_user
+                        ).all()
+                        member_ids = [m.user_id for m in members]
+                        if user_id in member_ids:
+                            await manager.send_group_message(
+                                user_id, to_user, member_ids, content, attachment
+                            )
+                        else:
+                            logging.warning(f"User {user_id} not a member of {to_user}")
+                    except Exception as e:
+                        logging.error(f"Error sending group message: {e}")
+                elif to_user and (content or attachment):
                     await manager.send_chat_message(user_id, to_user, content, attachment)
                 else:
                     logging.warning(f"Invalid chat message: missing to_user or content/attachment")
@@ -511,6 +548,116 @@ async def auth_login(req: AuthLoginRequest, db: Session = Depends(get_db)):
         raise HTTPException(status_code=503, detail="Database unavailable.")
 
 
+# ── Groups ────────────────────────────────────────────────────────────────────
+
+@app.post("/groups")
+async def create_group(group: GroupCreate, db: Session = Depends(get_db)):
+    """Create a new group. The creator is automatically a member."""
+    group_id = f"group:{uuid.uuid4()}"
+    try:
+        db_group = Group(
+            group_id=group_id,
+            name=group.name,
+            icon=group.icon,
+            created_by=group.created_by,
+        )
+        db.add(db_group)
+
+        # Add creator + initial members
+        all_member_ids = list(dict.fromkeys([group.created_by] + group.member_ids))
+        for mid in all_member_ids:
+            db.add(GroupMember(group_id=group_id, user_id=mid))
+        db.commit()
+
+        # Notify all online members about the new group
+        group_data = {
+            "group_id": group_id,
+            "name": group.name,
+            "icon": group.icon,
+            "created_by": group.created_by,
+            "members": all_member_ids,
+        }
+        for mid in all_member_ids:
+            await manager.send_personal_message(
+                {"type": "group_created", "group": group_data}, mid
+            )
+
+        return group_data
+    except (OperationalError, SQLAlchemyError) as e:
+        logging.error(f"DB error creating group: {e}")
+        raise HTTPException(status_code=503, detail="Database unavailable.")
+
+
+@app.get("/groups/{user_id}")
+async def get_user_groups(user_id: str, db: Session = Depends(get_db)):
+    """Get all groups a user belongs to."""
+    try:
+        memberships = db.query(GroupMember).filter(GroupMember.user_id == user_id).all()
+        group_ids = [m.group_id for m in memberships]
+        if not group_ids:
+            return []
+        groups = db.query(Group).filter(Group.group_id.in_(group_ids)).all()
+        result = []
+        for g in groups:
+            members = db.query(GroupMember).filter(GroupMember.group_id == g.group_id).all()
+            result.append({
+                "group_id": g.group_id,
+                "name": g.name,
+                "icon": g.icon,
+                "created_by": g.created_by,
+                "members": [m.user_id for m in members],
+            })
+        return result
+    except Exception as e:
+        logging.error(f"Error fetching groups: {e}")
+        raise HTTPException(status_code=503, detail="Database unavailable.")
+
+
+class AddMemberRequest(BaseModel):
+    user_id: str
+
+
+@app.post("/groups/{group_id}/members")
+async def add_group_member(group_id: str, req: AddMemberRequest, db: Session = Depends(get_db)):
+    """Add a member to an existing group."""
+    try:
+        group = db.query(Group).filter(Group.group_id == group_id).first()
+        if not group:
+            raise HTTPException(status_code=404, detail="Group not found")
+
+        existing = db.query(GroupMember).filter(
+            GroupMember.group_id == group_id, GroupMember.user_id == req.user_id
+        ).first()
+        if existing:
+            raise HTTPException(status_code=409, detail="Already a member")
+
+        db.add(GroupMember(group_id=group_id, user_id=req.user_id))
+        db.commit()
+
+        # Build updated group data
+        members = db.query(GroupMember).filter(GroupMember.group_id == group_id).all()
+        group_data = {
+            "group_id": group_id,
+            "name": group.name,
+            "icon": group.icon,
+            "created_by": group.created_by,
+            "members": [m.user_id for m in members],
+        }
+
+        # Notify all members (including the new one)
+        for m in members:
+            await manager.send_personal_message(
+                {"type": "group_updated", "group": group_data}, m.user_id
+            )
+
+        return group_data
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.error(f"Error adding member to group: {e}")
+        raise HTTPException(status_code=503, detail="Database unavailable.")
+
+
 # ── Stripe membership ─────────────────────────────────────────────────────────
 
 @app.get("/user/{user_id}/credits")
@@ -615,25 +762,30 @@ async def stripe_webhook(request: Request, db: Session = Depends(get_db)):
 
     if event["type"] == "checkout.session.completed":
         session_obj = event["data"]["object"]
+        # Verify payment actually succeeded
+        if session_obj.get("payment_status") != "paid":
+            logging.warning(f"Checkout completed but payment_status={session_obj.get('payment_status')}")
+            return {"received": True}
+
         meta = session_obj.get("metadata") or {}
         user_id = meta.get("user_id")
-        credit_cents_str = meta.get("credit_cents")  # present for credit purchases, absent for subscriptions
+        credit_cents_str = meta.get("credit_cents")
+        stripe_session_id = session_obj.get("id", "")
+
         if user_id:
             try:
                 user = db.query(User).filter(User.user_id == user_id).first()
                 if user:
                     if credit_cents_str:
-                        # One-time credit top-up
                         add = int(credit_cents_str)
                         user.credits_cents = (getattr(user, "credits_cents", 0) or 0) + add
-                        logging.info(f"Added {add} credits to user {user_id}")
+                        logging.info(f"Added {add} credit cents to user {user_id} (session {stripe_session_id})")
                     else:
-                        # Membership subscription
                         user.is_member = True
-                        logging.info(f"Membership granted to user {user_id}")
+                        logging.info(f"Membership granted to user {user_id} (session {stripe_session_id})")
                     db.commit()
             except Exception as e:
-                logging.error(f"DB error processing payment: {e}")
+                logging.error(f"DB error processing payment for {user_id}: {e}")
 
     return {"received": True}
 

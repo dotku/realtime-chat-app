@@ -95,6 +95,25 @@ class ConnectionManager:
         await self.send_personal_message(message, from_user)
         await self.send_personal_message(message, to_user)
 
+    async def send_group_message(self, from_user: str, group_id: str,
+                                   member_ids: list, content: str,
+                                   attachment: dict = None):
+        """Send a chat message to all members of a group."""
+        message = {
+            "type": "chat",
+            "from_user": from_user,
+            "from_username": self.user_names.get(from_user, "Unknown"),
+            "to_user": group_id,
+            "group_id": group_id,
+            "content": content,
+            "timestamp": datetime.utcnow().isoformat(),
+        }
+        if attachment:
+            message["attachment"] = attachment
+
+        for member_id in member_ids:
+            await self.send_personal_message(message, member_id)
+
     def get_online_users(self):
         """Get list of all online users"""
         return [

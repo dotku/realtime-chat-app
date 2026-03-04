@@ -27,6 +27,35 @@ const POPULAR_MODELS = [
   { id: 'deepseek/deepseek-chat', name: 'DeepSeek Chat', provider: 'DeepSeek' },
 ];
 
+// Provider logo avatars
+const PROVIDER_STYLES = {
+  Anthropic:  { bg: '#d97757', label: 'A' },
+  OpenAI:     { bg: '#10a37f', label: '' },   // uses SVG
+  Google:     { bg: '#4285f4', label: 'G' },
+  xAI:        { bg: '#000000', label: 'X' },
+  Meta:       { bg: '#0668e1', label: '∞' },
+  DeepSeek:   { bg: '#4d6bfe', label: 'DS' },
+};
+
+function ProviderLogo({ provider }) {
+  const style = PROVIDER_STYLES[provider] || { bg: '#888', label: '?' };
+  // OpenAI special SVG
+  if (provider === 'OpenAI') {
+    return (
+      <div className="provider-logo" style={{ background: style.bg }}>
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="white">
+          <path d="M22.282 9.821a5.985 5.985 0 00-.516-4.91 6.046 6.046 0 00-6.51-2.9A6.065 6.065 0 0011.67.014a6.048 6.048 0 00-5.771 4.17 5.985 5.985 0 00-3.998 2.9 6.046 6.046 0 00.743 7.097 5.98 5.98 0 00.51 4.911 6.051 6.051 0 006.515 2.9A5.985 5.985 0 0013.26 23.1a6.043 6.043 0 005.77-4.175 5.985 5.985 0 003.997-2.9 6.046 6.046 0 00-.745-6.204z"/>
+        </svg>
+      </div>
+    );
+  }
+  return (
+    <div className="provider-logo" style={{ background: style.bg }}>
+      <span>{style.label}</span>
+    </div>
+  );
+}
+
 function makeAiUser(model) {
   return {
     user_id: `ai:${model.id}`,
@@ -37,12 +66,34 @@ function makeAiUser(model) {
   };
 }
 
+// Default system agent that knows about SphareChat
+const DEFAULT_AGENTS = [
+  {
+    id: 'spharechat-assistant',
+    name: 'SphareChat Assistant',
+    model: 'anthropic/claude-sonnet-4-5',
+    icon: '💬',
+    systemPrompt: `You are the SphareChat Assistant — an AI helper built into SphareChat, a real-time chat application.
+
+About SphareChat:
+- A modern real-time chat app with WebSocket messaging, AI chat, and group chat
+- Users can chat with other online users, AI models (Claude, GPT-4o, Gemini, Grok, Llama, DeepSeek), and custom Agents
+- Features: guest login (no registration required), Auth0 sign-in for $5 free AI credits, file attachments (images, PDF, DOCX), markdown support, @mentions
+- Credit system: Anonymous users get $1 free, registered users get $5 free, credits can be purchased via Stripe
+- Built with React + Vite frontend, FastAPI + WebSocket backend, PostgreSQL database
+- Supports group chat: create groups, invite members, send messages visible to all group members
+
+Your role: Help users navigate SphareChat, explain features, troubleshoot issues, and answer questions about the app. Be friendly, concise, and helpful.`,
+  },
+];
+
 function makeAgentUser(agent) {
   return {
     user_id: `agent:${agent.id}`,
     username: agent.name,
     model: agent.model,
     systemPrompt: agent.systemPrompt,
+    icon: agent.icon || '🛠',
     type: 'agent',
   };
 }
@@ -97,17 +148,21 @@ function App() {
   const [activeTab, setActiveTab] = useState('users'); // 'users' | 'ai' | 'agents'
   const [showSettings, setShowSettings] = useState(false);
   const [showProfile, setShowProfile] = useState(false);
+  const [editingName, setEditingName] = useState(false);
+  const [draftName, setDraftName] = useState('');
 
   // AI Models
   const [allModels, setAllModels] = useState([]);
-  const [modelsLoading, setModelsLoading] = useState(false);
-  const [modelSearch, setModelSearch] = useState('');
-  const [showAllModels, setShowAllModels] = useState(false);
 
   // Agents
   const [agents, setAgents] = useState(loadAgentsFromStorage);
   const [showAgentForm, setShowAgentForm] = useState(false);
-  const [agentDraft, setAgentDraft] = useState({ name: '', model: POPULAR_MODELS[0].id, systemPrompt: '' });
+  const [agentDraft, setAgentDraft] = useState({ name: '', model: POPULAR_MODELS[0].id, systemPrompt: '', icon: '🛠' });
+
+  // Groups
+  const [groups, setGroups] = useState([]);
+  const [showGroupForm, setShowGroupForm] = useState(false);
+  const [groupDraft, setGroupDraft] = useState({ name: '', icon: '👥', memberIds: [] });
 
   // Settings / storage
   const [soundEnabled, setSoundEnabled] = useState(() => localStorage.getItem('chat_sound') !== 'off');
@@ -363,10 +418,18 @@ function App() {
         setMessages(prev => [...prev, data]);
         saveMessage(data, uid).then(() =>
           getStorageUsage(uid).then(setStorageUsage).catch(() => {})).catch(console.error);
-        if (data.from_user !== selectedUserRef.current?.user_id) {
-          setUnreadCounts(prev => ({ ...prev, [data.from_user]: (prev[data.from_user] || 0) + 1 }));
+        // Use group_id as unread key for group messages, from_user for 1-to-1
+        const unreadKey = data.group_id || data.from_user;
+        if (unreadKey !== selectedUserRef.current?.user_id) {
+          setUnreadCounts(prev => ({ ...prev, [unreadKey]: (prev[unreadKey] || 0) + 1 }));
           playNotificationSound();
         }
+      } else if (data.type === 'user_groups') {
+        setGroups(data.groups);
+      } else if (data.type === 'group_created') {
+        setGroups(prev => prev.find(g => g.group_id === data.group.group_id) ? prev : [...prev, data.group]);
+      } else if (data.type === 'group_updated') {
+        setGroups(prev => prev.map(g => g.group_id === data.group.group_id ? data.group : g));
       }
     };
 
@@ -690,7 +753,7 @@ function App() {
     const updated = [...agents, newAgent];
     setAgents(updated);
     saveAgentsToStorage(updated);
-    setAgentDraft({ name: '', model: POPULAR_MODELS[0].id, systemPrompt: '' });
+    setAgentDraft({ name: '', model: POPULAR_MODELS[0].id, systemPrompt: '', icon: '🛠' });
     setShowAgentForm(false);
   };
 
@@ -698,6 +761,33 @@ function App() {
     const updated = agents.filter(a => a.id !== id);
     setAgents(updated);
     saveAgentsToStorage(updated);
+  };
+
+  // ── Groups ──────────────────────────────────────────────────────────────────
+
+  const handleCreateGroup = async () => {
+    if (!groupDraft.name.trim()) return;
+    try {
+      const res = await fetch(`${API_URL}/groups`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: groupDraft.name,
+          icon: groupDraft.icon,
+          created_by: userId,
+          member_ids: [userId, ...groupDraft.memberIds],
+        }),
+      });
+      if (!res.ok) throw new Error('Failed to create group');
+      const data = await res.json();
+      // The backend sends group_created via WebSocket too, but add locally for instant feedback
+      setGroups(prev => prev.find(g => g.group_id === data.group_id) ? prev : [...prev, data]);
+      setGroupDraft({ name: '', icon: '👥', memberIds: [] });
+      setShowGroupForm(false);
+    } catch (err) {
+      console.error(err);
+      alert('Failed to create group.');
+    }
   };
 
   // ── Settings / logout ────────────────────────────────────────────────────────
@@ -751,9 +841,6 @@ function App() {
     }
   };
 
-  const handleRegister = () => {
-    loginWithRedirect({ authorizationParams: { screen_hint: 'signup' } });
-  };
 
   const handleSignIn = () => {
     loginWithRedirect();
@@ -779,26 +866,21 @@ function App() {
 
   const getMessagesForCurrentChat = () => {
     if (!selectedUser) return [];
+    // Group chat: all messages sent to this group
+    if (selectedUser.type === 'group') {
+      return messages.filter(m => m.to_user === selectedUser.user_id);
+    }
     return messages.filter(m =>
       (m.from_user === userId && m.to_user === selectedUser.user_id) ||
       (m.from_user === selectedUser.user_id && m.to_user === userId)
     );
   };
 
-  const filteredModels = (showAllModels ? (allModels.length ? allModels : POPULAR_MODELS) : POPULAR_MODELS)
-    .filter(m => !modelSearch || m.name.toLowerCase().includes(modelSearch.toLowerCase()) || m.provider.toLowerCase().includes(modelSearch.toLowerCase()));
-
-  // Group models by provider
-  const modelsByProvider = filteredModels.reduce((acc, m) => {
-    (acc[m.provider] = acc[m.provider] || []).push(m);
-    return acc;
-  }, {});
-
   const mentionCandidates = getMentionCandidates();
 
   // ── Login screen ─────────────────────────────────────────────────────────────
 
-  // Auth0 loading or not yet authenticated
+  // Waiting for Auth0 init or no user yet
   if (auth0Loading || (!isAuthenticated && !userId)) {
     return (
       <div className="login-container">
@@ -814,14 +896,39 @@ function App() {
             <p className="auth-loading">Checking session...</p>
           ) : (
             <>
-              <p>Sign in to start chatting</p>
-              <button
-                className="join-button auth0-login-btn"
-                onClick={() => loginWithRedirect()}
-                disabled={serverStatus === 'offline'}
-              >
-                Sign in
-              </button>
+              {/* Guest entry */}
+              <div className="guest-entry">
+                <input
+                  className="guest-name-input"
+                  type="text"
+                  placeholder="Enter your name (or leave blank)"
+                  value={username}
+                  onChange={e => setUsername(e.target.value)}
+                  onKeyDown={e => e.key === 'Enter' && serverStatus !== 'offline' && handleJoin()}
+                  maxLength={30}
+                />
+                <button
+                  className="join-button guest-join-btn"
+                  onClick={handleJoin}
+                  disabled={serverStatus === 'offline'}
+                >
+                  Start Chatting
+                </button>
+              </div>
+
+              <div className="login-divider"><span>or</span></div>
+
+              {/* Auth0 sign in for $5 credits */}
+              <div className="login-promo">
+                <p className="login-promo-text">🎁 Sign in for <strong>$5 free</strong> AI credits</p>
+                <button
+                  className="join-button auth0-login-btn"
+                  onClick={() => loginWithRedirect()}
+                  disabled={serverStatus === 'offline'}
+                >
+                  Sign in with Google
+                </button>
+              </div>
             </>
           )}
         </div>
@@ -844,8 +951,20 @@ function App() {
       {/* ── Sidebar ── */}
       <div className="sidebar">
         <div className="sidebar-header">
-          <div className="sidebar-header-top">
-            {/* Avatar — opens profile modal (authenticated) or sign-in (guest) */}
+          {/* Row 1: Title | Notification | Settings */}
+          <div className="sidebar-header-row1">
+            <h2>SphareChat</h2>
+            <div className="sidebar-header-actions">
+              <button className={`icon-button ${soundEnabled ? '' : 'muted'}`} onClick={toggleSound}
+                title={soundEnabled ? 'Mute' : 'Unmute'}>
+                {soundEnabled ? '🔔' : '🔕'}
+              </button>
+              <button className={`icon-button ${showSettings ? 'active' : ''}`}
+                onClick={() => setShowSettings(v => !v)} title="Settings">⚙️</button>
+            </div>
+          </div>
+          {/* Row 2: Avatar | Name | Credit */}
+          <div className="sidebar-header-row2">
             <button
               className="header-avatar-btn"
               onClick={() => isAuthenticated ? setShowProfile(true) : handleSignIn()}
@@ -857,23 +976,53 @@ function App() {
                 <div className="header-avatar-initials">{username.charAt(0).toUpperCase()}</div>
               )}
             </button>
-            <h2>SphareChat</h2>
-            <div className="sidebar-header-actions">
-              {userCredits !== null && (
-                <span
-                  className={`credits-badge-mini ${userCredits < 20 ? 'credits-low' : ''}`}
-                  title="AI credits"
-                >
-                  ${(userCredits / 100).toFixed(2)}
-                </span>
-              )}
-              <button className={`icon-button ${soundEnabled ? '' : 'muted'}`} onClick={toggleSound}
-                title={soundEnabled ? 'Mute' : 'Unmute'}>
-                {soundEnabled ? '🔔' : '🔕'}
-              </button>
-              <button className={`icon-button ${showSettings ? 'active' : ''}`}
-                onClick={() => setShowSettings(v => !v)} title="Settings">⚙️</button>
-            </div>
+            {editingName ? (
+              <input
+                className="header-username-input"
+                value={draftName}
+                onChange={e => setDraftName(e.target.value)}
+                onKeyDown={e => {
+                  if (e.key === 'Enter') {
+                    const newName = draftName.trim();
+                    if (newName && newName !== username) {
+                      setUsername(newName);
+                      localStorage.setItem('chat_username', newName);
+                    }
+                    setEditingName(false);
+                  }
+                  if (e.key === 'Escape') setEditingName(false);
+                }}
+                onBlur={() => {
+                  const newName = draftName.trim();
+                  if (newName && newName !== username) {
+                    setUsername(newName);
+                    localStorage.setItem('chat_username', newName);
+                  }
+                  setEditingName(false);
+                }}
+                maxLength={30}
+                autoFocus
+              />
+            ) : (
+              <span
+                className="header-username"
+                onClick={() => { setDraftName(username); setEditingName(true); }}
+                title="Click to edit name"
+              >
+                {username} ✎
+              </span>
+            )}
+            {userCredits !== null && (
+              <span
+                className={`credits-badge-mini ${userCredits < 20 ? 'credits-low' : ''}`}
+                title="AI credits"
+              >
+                💳 ${(userCredits / 100).toFixed(2)}
+              </span>
+            )}
+            {isAuthenticated && (
+              <button className="icon-button" onClick={handleLogout} title="Sign out">🚪</button>
+            )}
           </div>
         </div>
 
@@ -884,20 +1033,42 @@ function App() {
           </div>
         )}
 
-        {/* Registration prompt — only for confirmed anonymous unauthenticated users */}
-        {!auth0Loading && !isAuthenticated && userIsAnonymous && (
-          <div className="register-prompt">
-            <div className="register-prompt-body">
-              <span className="register-prompt-icon">🎁</span>
-              <div>
-                <div className="register-prompt-title">Get $5 free AI credits</div>
-                <div className="register-prompt-sub">Register with your email — verified &amp; free</div>
-              </div>
-            </div>
-            <div className="register-prompt-actions">
-              <button className="register-email-btn" onClick={handleRegister}>Register with Email</button>
-              <button className="signin-link-btn" onClick={handleSignIn}>Already have an account?</button>
-            </div>
+        {/* Subtle upgrade banner for anonymous guests */}
+        {!auth0Loading && userIsAnonymous && !isAuthenticated && (
+          <button className="upgrade-banner" onClick={handleSignIn}>
+            🎁 Sign in for <strong>$5 free</strong> AI credits →
+          </button>
+        )}
+
+        {/* Auth0 authenticated but backend sync pending */}
+        {isAuthenticated && userIsAnonymous && (
+          <div className="sync-banner">
+            <span>Syncing your account...</span>
+            <button className="sync-retry-btn" onClick={async () => {
+              try {
+                const claims = await getIdTokenClaims();
+                const idToken = claims?.__raw;
+                if (!idToken) return;
+                const displayName = auth0User.nickname || auth0User.name || auth0User.email?.split('@')[0] || '';
+                const res = await fetch(`${import.meta.env.VITE_API_URL}/auth/login`, {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ token: idToken, username: displayName }),
+                });
+                if (!res.ok) { alert('Server sync failed — backend may not be deployed yet.'); return; }
+                const data = await res.json();
+                setUserId(data.user_id);
+                setUsername(data.username);
+                setUserCredits(data.credits_cents ?? null);
+                setUserIsAnonymous(false);
+                setUserPicture(auth0User.picture || null);
+                setUserEmail(auth0User.email || null);
+                localStorage.setItem('chat_userId', data.user_id);
+                localStorage.setItem('chat_username', data.username);
+                if (wsUserIdRef.current !== data.user_id) connectWebSocket(data.user_id, data.username);
+              } catch (err) { alert('Connection error: ' + err.message); }
+            }}>Retry</button>
+            <button className="signin-link-btn" onClick={handleLogout}>Sign out</button>
           </div>
         )}
 
@@ -925,74 +1096,94 @@ function App() {
         {/* Tabs */}
         <div className="sidebar-tabs">
           <button className={`sidebar-tab ${activeTab === 'users' ? 'active' : ''}`} onClick={() => setActiveTab('users')}>
-            👥 Users
-          </button>
-          <button className={`sidebar-tab ${activeTab === 'ai' ? 'active' : ''}`} onClick={() => setActiveTab('ai')}>
-            🤖 AI
+            💬 Chats
           </button>
           <button className={`sidebar-tab ${activeTab === 'agents' ? 'active' : ''}`} onClick={() => setActiveTab('agents')}>
             🛠 Agents
           </button>
         </div>
 
-        {/* Tab: Users */}
+        {/* Tab: Users — default agent + AI + groups + humans */}
         {activeTab === 'users' && (
           <div className="users-list">
-            {onlineUsers.length === 0 ? (
-              <div className="no-users">No other users online</div>
-            ) : onlineUsers.map(user => (
-              <div key={user.user_id}
-                className={`user-item ${selectedUser?.user_id === user.user_id ? 'selected' : ''}`}
-                onClick={() => selectContact(user)}>
+            {[
+              ...DEFAULT_AGENTS.map(a => makeAgentUser(a)),
+              ...POPULAR_MODELS.map(model => ({ ...makeAiUser(model), _model: model })),
+              ...groups.map(g => ({ user_id: g.group_id, username: g.name, type: 'group', icon: g.icon, members: g.members })),
+              ...onlineUsers,
+            ].map(contact => (
+              <div key={contact.user_id}
+                className={`user-item ${selectedUser?.user_id === contact.user_id ? 'selected' : ''}`}
+                onClick={() => selectContact(contact)}>
                 <div className="user-avatar-wrapper">
-                  <div className="user-avatar">{user.username.charAt(0).toUpperCase()}</div>
-                  {unreadCounts[user.user_id] > 0 && (
-                    <span className="unread-badge">{unreadCounts[user.user_id] > 99 ? '99+' : unreadCounts[user.user_id]}</span>
+                  {contact.type === 'ai' ? (
+                    <ProviderLogo provider={contact._model?.provider || contact.provider} />
+                  ) : contact.type === 'group' ? (
+                    <div className="user-avatar group-avatar">{contact.icon || '👥'}</div>
+                  ) : contact.type === 'agent' ? (
+                    <div className="user-avatar agent-avatar">{contact.icon || '🛠'}</div>
+                  ) : (
+                    <div className="user-avatar">{contact.username.charAt(0).toUpperCase()}</div>
+                  )}
+                  {unreadCounts[contact.user_id] > 0 && (
+                    <span className="unread-badge">{unreadCounts[contact.user_id] > 99 ? '99+' : unreadCounts[contact.user_id]}</span>
                   )}
                 </div>
                 <div className="user-info">
-                  <div className="user-name">{user.username}</div>
-                  <div className="user-status"><span className="online-dot"></span> Online</div>
+                  <div className="user-name">{contact.username}</div>
+                  <div className="user-status">
+                    {contact.type === 'group' ? (
+                      <><span className="group-dot"></span> {contact.members?.length || 0} members</>
+                    ) : contact.type === 'ai' ? (
+                      <><span className="ai-dot"></span> {contact._model?.provider || 'AI'}</>
+                    ) : contact.type === 'agent' ? (
+                      <><span className="ai-dot"></span> Agent</>
+                    ) : (
+                      <><span className="online-dot"></span> Online</>
+                    )}
+                  </div>
                 </div>
               </div>
             ))}
-          </div>
-        )}
 
-        {/* Tab: AI Models */}
-        {activeTab === 'ai' && (
-          <div className="ai-panel">
-            <div className="ai-search-bar">
-              <input
-                type="text"
-                placeholder="Search models..."
-                value={modelSearch}
-                onChange={e => setModelSearch(e.target.value)}
-                className="ai-search-input"
-              />
-              <button className="show-all-btn" onClick={() => setShowAllModels(v => !v)}>
-                {showAllModels ? 'Popular' : 'All models'}
-              </button>
-            </div>
-            {modelsLoading && <div className="ai-loading">Loading models...</div>}
-            <div className="models-list">
-              {Object.entries(modelsByProvider).map(([provider, mods]) => (
-                <div key={provider} className="model-provider-group">
-                  <div className="model-provider-label">{provider}</div>
-                  {mods.map(model => (
-                    <div key={model.id}
-                      className={`model-item ${selectedUser?.model === model.id ? 'selected' : ''}`}
-                      onClick={() => selectContact(makeAiUser(model))}>
-                      <div className="model-avatar">🤖</div>
-                      <div className="user-info">
-                        <div className="user-name">{model.name || model.id.split('/').pop()}</div>
-                        <div className="model-id">{model.id}</div>
-                      </div>
-                    </div>
+            {/* New Group button + form */}
+            {showGroupForm ? (
+              <div className="group-form">
+                <input className="agent-input" placeholder="Group name *" value={groupDraft.name}
+                  onChange={e => setGroupDraft(d => ({ ...d, name: e.target.value }))}
+                  onKeyDown={e => e.key === 'Enter' && handleCreateGroup()} />
+                <div className="icon-picker">
+                  {['👥','🏠','💼','🎮','📚','🎵','⚽','🍕','💬','🌍'].map(icon => (
+                    <button key={icon} type="button"
+                      className={`icon-option ${groupDraft.icon === icon ? 'selected' : ''}`}
+                      onClick={() => setGroupDraft(d => ({ ...d, icon }))}>{icon}</button>
                   ))}
                 </div>
-              ))}
-            </div>
+                <div className="member-picker">
+                  <div className="member-picker-label">Add members:</div>
+                  {onlineUsers.map(u => (
+                    <label key={u.user_id} className="member-picker-item">
+                      <input type="checkbox"
+                        checked={groupDraft.memberIds.includes(u.user_id)}
+                        onChange={() => setGroupDraft(d => ({
+                          ...d,
+                          memberIds: d.memberIds.includes(u.user_id)
+                            ? d.memberIds.filter(id => id !== u.user_id)
+                            : [...d.memberIds, u.user_id]
+                        }))} />
+                      {u.username}
+                    </label>
+                  ))}
+                  {onlineUsers.length === 0 && <div className="no-users">No online users</div>}
+                </div>
+                <div className="agent-form-buttons">
+                  <button className="join-button agent-save-btn" onClick={handleCreateGroup}>Create Group</button>
+                  <button className="logout-button" onClick={() => setShowGroupForm(false)}>Cancel</button>
+                </div>
+              </div>
+            ) : (
+              <button className="new-group-btn" onClick={() => setShowGroupForm(true)}>+ New Group</button>
+            )}
           </div>
         )}
 
@@ -1007,7 +1198,7 @@ function App() {
                 <div key={agent.id}
                   className={`user-item ${selectedUser?.user_id === `agent:${agent.id}` ? 'selected' : ''}`}
                   onClick={() => selectContact(makeAgentUser(agent))}>
-                  <div className="user-avatar agent-avatar">🛠</div>
+                  <div className="user-avatar agent-avatar">{agent.icon || '🛠'}</div>
                   <div className="user-info">
                     <div className="user-name">{agent.name}</div>
                     <div className="model-id">{agent.model}</div>
@@ -1021,6 +1212,13 @@ function App() {
               <div className="agent-form">
                 <input className="agent-input" placeholder="Agent name *" value={agentDraft.name}
                   onChange={e => setAgentDraft(d => ({ ...d, name: e.target.value }))} />
+                <div className="icon-picker">
+                  {['🛠','🤖','🧠','📊','✍️','🎨','🔬','💡','📝','🎯'].map(icon => (
+                    <button key={icon} type="button"
+                      className={`icon-option ${agentDraft.icon === icon ? 'selected' : ''}`}
+                      onClick={() => setAgentDraft(d => ({ ...d, icon }))}>{icon}</button>
+                  ))}
+                </div>
                 <select className="agent-select" value={agentDraft.model}
                   onChange={e => setAgentDraft(d => ({ ...d, model: e.target.value }))}>
                   {POPULAR_MODELS.map(m => <option key={m.id} value={m.id}>{m.name}</option>)}
@@ -1046,15 +1244,21 @@ function App() {
           <>
             <div className="chat-header">
               <div className="chat-user-info">
-                <div className={`user-avatar ${selectedUser.type === 'agent' ? 'agent-avatar' : ''}`}>
-                  {selectedUser.type === 'ai' ? '🤖' :
-                   selectedUser.type === 'agent' ? '🛠' :
-                   selectedUser.username.charAt(0).toUpperCase()}
-                </div>
+                {selectedUser.type === 'ai' ? (
+                  <ProviderLogo provider={selectedUser.provider} />
+                ) : selectedUser.type === 'group' ? (
+                  <div className="user-avatar group-avatar">{selectedUser.icon || '👥'}</div>
+                ) : selectedUser.type === 'agent' ? (
+                  <div className="user-avatar agent-avatar">{selectedUser.icon || '🛠'}</div>
+                ) : (
+                  <div className="user-avatar">{selectedUser.username.charAt(0).toUpperCase()}</div>
+                )}
                 <div>
                   <div className="chat-username">{selectedUser.username}</div>
                   <div className="chat-status">
-                    {selectedUser.type === 'ai' || selectedUser.type === 'agent' ? (
+                    {selectedUser.type === 'group' ? (
+                      <><span className="group-dot"></span> {selectedUser.members?.length || 0} members</>
+                    ) : selectedUser.type === 'ai' || selectedUser.type === 'agent' ? (
                       <><span className="ai-dot"></span> {selectedUser.model}</>
                     ) : (
                       <><span className="online-dot"></span> Online</>
@@ -1067,6 +1271,9 @@ function App() {
             <div className="messages-container">
               {getMessagesForCurrentChat().map((msg, i) => (
                 <div key={i} className={`message ${msg.from_user === userId ? 'sent' : 'received'} ${msg.isError ? 'error-msg' : ''}`}>
+                  {msg.from_user !== userId && selectedUser?.type === 'group' && (
+                    <div className="group-msg-sender">{msg.from_username}</div>
+                  )}
                   {msg.content && (
                     <div className="message-content markdown-body">
                       <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.content}</ReactMarkdown>
@@ -1115,7 +1322,7 @@ function App() {
                 <div className="mention-dropdown">
                   {mentionCandidates.map((c, i) => (
                     <div key={i} className="mention-item" onClick={() => applyMention(c)}>
-                      <span className="mention-type-badge">{c.type === 'ai' ? '🤖' : c.type === 'agent' ? '🛠' : '👤'}</span>
+                      <span className="mention-type-badge">{c.type === 'ai' ? '🤖' : c.type === 'agent' ? (c.agent?.icon || '🛠') : '👤'}</span>
                       <span className="mention-label">{c.label}</span>
                       {c.type === 'ai' && <span className="mention-sublabel">{c.model?.provider}</span>}
                     </div>

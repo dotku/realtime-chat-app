@@ -17,6 +17,24 @@ class UserResponse(BaseModel):
         from_attributes = True
 
 
+class GroupCreate(BaseModel):
+    name: str
+    icon: str = "👥"
+    created_by: str
+    member_ids: list[str] = []
+
+
+class GroupResponse(BaseModel):
+    group_id: str
+    name: str
+    icon: str
+    created_by: str
+    members: list[str]
+
+    class Config:
+        from_attributes = True
+
+
 class Message(BaseModel):
     type: str  # "chat", "user_joined", "user_left", "online_users"
     from_user: Optional[str] = None

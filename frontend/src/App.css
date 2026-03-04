@@ -97,6 +97,66 @@ body {
   gap: 0.5rem;
 }
 
+/* Guest entry */
+.guest-entry {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  width: 100%;
+}
+
+.guest-name-input {
+  width: 100%;
+  padding: 0.75rem 1rem;
+  border: 2px solid #e0e0e0;
+  border-radius: 8px;
+  font-size: 0.95rem;
+  outline: none;
+  transition: border-color 0.2s;
+  box-sizing: border-box;
+}
+
+.guest-name-input:focus {
+  border-color: #667eea;
+}
+
+.guest-join-btn {
+  background: linear-gradient(135deg, #34d399, #059669) !important;
+}
+
+/* Login divider */
+.login-divider {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin: 1rem 0;
+  color: #bbb;
+  font-size: 0.8rem;
+}
+
+.login-divider::before,
+.login-divider::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: #e0e0e0;
+}
+
+/* Login promo */
+.login-promo {
+  text-align: center;
+}
+
+.login-promo-text {
+  font-size: 0.85rem;
+  color: #666;
+  margin-bottom: 0.75rem;
+}
+
+.login-promo-text strong {
+  color: #7c3aed;
+}
+
 /* Server Status Indicator */
 .server-status {
   display: flex;
@@ -190,13 +250,62 @@ body {
   color: white;
 }
 
-.sidebar-header-top {
+/* Row 1: Title | Actions */
+.sidebar-header-row1 {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.sidebar-header-row1 h2 {
+  font-size: 1.2rem;
+  margin: 0;
+}
+
+.sidebar-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+/* Row 2: Avatar | Name | Credit */
+.sidebar-header-row2 {
   display: flex;
   align-items: center;
   gap: 0.6rem;
+  margin-top: 0.6rem;
 }
 
-.sidebar-header-top h2 { flex: 1; }
+.header-username {
+  flex: 1;
+  font-size: 0.85rem;
+  font-weight: 600;
+  opacity: 0.95;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+  border-radius: 4px;
+  padding: 0.1rem 0.3rem;
+  transition: background 0.15s;
+}
+
+.header-username:hover {
+  background: rgba(255,255,255,0.15);
+}
+
+.header-username-input {
+  flex: 1;
+  font-size: 0.85rem;
+  font-weight: 600;
+  background: rgba(255,255,255,0.9);
+  color: #333;
+  border: none;
+  border-radius: 4px;
+  padding: 0.2rem 0.4rem;
+  outline: none;
+  min-width: 0;
+}
 
 /* Header avatar */
 .header-avatar-btn {
@@ -533,6 +642,15 @@ body {
   overflow-y: auto;
 }
 
+.users-section-label {
+  padding: 0.5rem 1rem 0.25rem;
+  font-size: 0.7rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #999;
+}
+
 .no-users {
   padding: 2rem;
   text-align: center;
@@ -736,6 +854,20 @@ body {
   flex-shrink: 0;
 }
 
+.provider-logo {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  color: white;
+  font-weight: 800;
+  font-size: 0.85rem;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+}
+
 .model-id {
   font-size: 0.7rem;
   color: #aaa;
@@ -761,6 +893,111 @@ body {
 .agent-avatar {
   background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
   font-size: 1rem;
+}
+
+/* Group avatar */
+.group-avatar {
+  background: linear-gradient(135deg, #43e97b 0%, #38f9d7 100%);
+  font-size: 1.1rem;
+}
+
+.group-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #43e97b;
+  margin-right: 4px;
+}
+
+/* Group message sender label */
+.group-msg-sender {
+  font-size: 0.7rem;
+  color: #888;
+  margin-bottom: 2px;
+  font-weight: 600;
+}
+
+/* Icon picker (shared by group + agent forms) */
+.icon-picker {
+  display: flex;
+  gap: 0.25rem;
+  flex-wrap: wrap;
+}
+
+.icon-option {
+  width: 36px;
+  height: 36px;
+  border-radius: 8px;
+  border: 2px solid transparent;
+  background: #f5f5f5;
+  font-size: 1.1rem;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: border-color 0.2s;
+}
+
+.icon-option:hover {
+  background: #eee;
+}
+
+.icon-option.selected {
+  border-color: #667eea;
+  background: #eeeeff;
+}
+
+/* Member picker for group creation */
+.member-picker {
+  max-height: 120px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.member-picker-label {
+  font-size: 0.75rem;
+  color: #888;
+  font-weight: 600;
+  margin-bottom: 0.125rem;
+}
+
+.member-picker-item {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.85rem;
+  cursor: pointer;
+  padding: 0.125rem 0;
+}
+
+/* Group form */
+.group-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 0.75rem;
+  border-top: 1px solid #e8e8e8;
+}
+
+/* New Group button */
+.new-group-btn {
+  margin: 0.5rem 0.75rem;
+  padding: 0.5rem;
+  background: linear-gradient(135deg, #43e97b 0%, #38f9d7 100%);
+  color: white;
+  border: none;
+  border-radius: 8px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: transform 0.2s;
+}
+
+.new-group-btn:hover {
+  transform: scale(1.02);
 }
 
 .agent-delete-btn {
@@ -1229,24 +1466,70 @@ body {
 }
 .credits-badge.credits-low:hover { background: #f9d5d3; }
 
-/* Anonymous user registration prompt */
-.register-prompt {
-  margin: 0.5rem 0.75rem;
-  padding: 0.75rem;
-  background: linear-gradient(135deg, #667eea15, #764ba215);
-  border: 1px solid #667eea40;
-  border-radius: 10px;
+/* Subtle upgrade banner for guests */
+.upgrade-banner {
+  display: block;
+  width: auto;
+  margin: 0.4rem 0.75rem;
+  padding: 0.45rem 0.75rem;
+  background: linear-gradient(135deg, #667eea18, #764ba218);
+  border: 1px solid #667eea30;
+  border-radius: 8px;
+  font-size: 0.78rem;
+  color: #555;
+  text-align: center;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
 }
-.register-prompt-body {
+.upgrade-banner:hover {
+  background: linear-gradient(135deg, #667eea28, #764ba228);
+  border-color: #667eea50;
+  color: #333;
+}
+.upgrade-banner strong { color: #7c3aed; }
+
+/* Auth sync pending banner */
+.sync-banner {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   gap: 0.5rem;
-  margin-bottom: 0.6rem;
+  margin: 0.4rem 0.75rem;
+  padding: 0.4rem 0.75rem;
+  background: #fef3c7;
+  border: 1px solid #f59e0b40;
+  border-radius: 8px;
+  font-size: 0.75rem;
+  color: #92400e;
 }
-.register-prompt-icon { font-size: 1.3rem; flex-shrink: 0; }
-.register-prompt-title { font-size: 0.82rem; font-weight: 600; color: #333; }
-.register-prompt-sub { font-size: 0.73rem; color: #666; margin-top: 0.1rem; }
-.register-prompt-actions { display: flex; flex-direction: column; gap: 0.35rem; }
+.sync-retry-btn {
+  background: #f59e0b;
+  color: white;
+  border: none;
+  border-radius: 5px;
+  padding: 0.2rem 0.6rem;
+  font-size: 0.72rem;
+  font-weight: 600;
+  cursor: pointer;
+  margin-left: auto;
+}
+.sync-retry-btn:hover { background: #d97706; }
+.register-google-btn {
+  width: 100%;
+  padding: 0.5rem 0.75rem;
+  background: white;
+  color: #333;
+  border: 1px solid #ddd;
+  border-radius: 7px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.15s, box-shadow 0.15s;
+}
+.register-google-btn:hover { background: #f8f8f8; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+
 .register-email-btn {
   width: 100%;
   padding: 0.45rem 0.75rem;
@@ -1684,8 +1967,11 @@ body {
     padding: 0.5rem 0.75rem;
   }
 
-  .sidebar-header-top {
-    margin-bottom: 0.25rem;
+  .sidebar-header-row1 {
+    gap: 0.5rem;
+  }
+  .header-title-area h2 {
+    font-size: 1rem;
   }
 
   .sidebar-header h2 {

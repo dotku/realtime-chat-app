@@ -32,6 +32,25 @@ class User(Base):
     credits_cents = Column(Integer, default=100)  # 100 = $1.00 (anonymous); registered users get 500
 
 
+class Group(Base):
+    __tablename__ = "groups"
+
+    group_id = Column(String, primary_key=True, index=True)   # "group:{uuid}"
+    name = Column(String, nullable=False)
+    icon = Column(String, default="👥")
+    created_by = Column(String, nullable=False)               # user_id of creator
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class GroupMember(Base):
+    __tablename__ = "group_members"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    group_id = Column(String, nullable=False, index=True)
+    user_id = Column(String, nullable=False, index=True)
+    joined_at = Column(DateTime, default=datetime.utcnow)
+
+
 def init_db():
     Base.metadata.create_all(bind=engine)
 
