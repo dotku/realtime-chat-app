@@ -1,4 +1,4 @@
-from sqlalchemy import create_engine, Column, String, DateTime, Boolean
+from sqlalchemy import create_engine, Column, String, DateTime, Boolean, Integer
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 from datetime import datetime
@@ -27,6 +27,9 @@ class User(Base):
     is_online = Column(Boolean, default=True)
     connected_at = Column(DateTime, default=datetime.utcnow)
     last_seen = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    is_member = Column(Boolean, default=False)
+    auth0_sub = Column(String, unique=True, nullable=True, index=True)  # e.g. "auth0|abc123"
+    credits_cents = Column(Integer, default=100)  # 100 = $1.00 (anonymous); registered users get 500
 
 
 def init_db():

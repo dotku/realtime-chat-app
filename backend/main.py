@@ -1,17 +1,20 @@
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, HTTPException
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import OperationalError, SQLAlchemyError
 from sqlalchemy import text
-from datetime import datetime
+from datetime import datetime, date, timedelta
+from typing import Union
 import uuid
 import json
 import logging
 import os
 import httpx
+import stripe
+from jose import jwt as jose_jwt, JWTError
 
 from pydantic import BaseModel
-from database import init_db, get_db, User
+from database import init_db, get_db, User, engine
 from models import UserCreate, UserResponse, Message
 from connection_manager import manager
 
@@ -36,10 +39,86 @@ app.add_middleware(
 )
 
 
+# ── Auth0 config ──────────────────────────────────────────────────────────────
+
+AUTH0_DOMAIN = os.getenv("AUTH0_DOMAIN", "")       # e.g. dev-xxx.us.auth0.com
+AUTH0_CLIENT_ID = os.getenv("AUTH0_CLIENT_ID", "")
+
+# In-memory JWKS cache (refreshed every hour)
+_jwks_cache: dict = {"keys": None, "fetched_at": None}
+_JWKS_TTL = 3600
+
+
+async def _get_jwks() -> list:
+    now = datetime.utcnow()
+    cached = _jwks_cache
+    if (
+        cached["keys"] is None
+        or cached["fetched_at"] is None
+        or (now - cached["fetched_at"]).total_seconds() > _JWKS_TTL
+    ):
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(f"https://{AUTH0_DOMAIN}/.well-known/jwks.json", timeout=10)
+            resp.raise_for_status()
+            _jwks_cache["keys"] = resp.json()["keys"]
+            _jwks_cache["fetched_at"] = now
+    return _jwks_cache["keys"]
+
+
+async def verify_id_token(token: str) -> dict:
+    """Verify an Auth0 ID token (RS256) and return its claims."""
+    if not AUTH0_DOMAIN or not AUTH0_CLIENT_ID:
+        raise HTTPException(status_code=503, detail="Auth0 is not configured on the server.")
+    try:
+        keys = await _get_jwks()
+        header = jose_jwt.get_unverified_header(token)
+        rsa_key = next(
+            (
+                {"kty": k["kty"], "kid": k["kid"], "n": k["n"], "e": k["e"]}
+                for k in keys
+                if k["kid"] == header.get("kid")
+            ),
+            None,
+        )
+        if not rsa_key:
+            raise HTTPException(status_code=401, detail="No matching signing key in Auth0 JWKS.")
+        payload = jose_jwt.decode(
+            token,
+            rsa_key,
+            algorithms=["RS256"],
+            audience=AUTH0_CLIENT_ID,
+            issuer=f"https://{AUTH0_DOMAIN}/",
+        )
+        return payload
+    except JWTError as e:
+        raise HTTPException(status_code=401, detail=f"Token validation failed: {e}")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.error(f"Auth0 token verification error: {e}")
+        raise HTTPException(status_code=401, detail="Token verification failed.")
+
+
 @app.on_event("startup")
 async def startup_event():
     try:
         init_db()
+        # Safely add columns that may be missing from existing tables
+        with engine.connect() as conn:
+            conn.execute(text(
+                "ALTER TABLE users ADD COLUMN IF NOT EXISTS is_member BOOLEAN DEFAULT FALSE"
+            ))
+            conn.execute(text(
+                "ALTER TABLE users ADD COLUMN IF NOT EXISTS auth0_sub VARCHAR"
+            ))
+            # Add unique index on auth0_sub if it doesn't exist yet
+            conn.execute(text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS ix_users_auth0_sub ON users (auth0_sub) WHERE auth0_sub IS NOT NULL"
+            ))
+            conn.execute(text(
+                "ALTER TABLE users ADD COLUMN IF NOT EXISTS credits_cents INTEGER DEFAULT 100"
+            ))
+            conn.commit()
         logging.info("Database initialized successfully")
     except Exception as e:
         logging.error(f"Failed to initialize database: {e}")
@@ -238,30 +317,105 @@ async def websocket_endpoint(
 
 
 GATEWAY_URL = "https://ai-gateway.vercel.sh/v1"
+DAILY_AI_LIMIT_USD = 10.0
+# Conservative average cost per token across all supported models (~$3/M)
+_AVG_COST_PER_TOKEN = 0.000003
+# We charge users 5× the provider cost; result in cents per token
+_USER_COST_RATE_CENTS = _AVG_COST_PER_TOKEN * 5 * 100  # = 0.0015 cents/token
+
+ANON_CREDIT_CENTS = 100    # $1.00 — anonymous users
+NEW_USER_CREDIT_CENTS = 500  # $5.00 — new registered users
+
+
+def _calc_user_cost_cents(total_tokens: int) -> int:
+    """Cost charged to the user in cents (minimum 1 cent per request)."""
+    return max(1, round(total_tokens * _USER_COST_RATE_CENTS))
+
+# In-memory daily usage tracker — resets naturally each new day
+_daily_ai_costs: dict[str, float] = {}
+
+
+def _today() -> str:
+    return date.today().isoformat()
+
+
+def _get_daily_cost() -> float:
+    return _daily_ai_costs.get(_today(), 0.0)
+
+
+def _add_daily_cost(total_tokens: int) -> None:
+    key = _today()
+    _daily_ai_costs[key] = _daily_ai_costs.get(key, 0.0) + total_tokens * _AVG_COST_PER_TOKEN
+    # Prune entries older than 7 days to avoid unbounded growth
+    cutoff = (date.today() - timedelta(days=7)).isoformat()
+    for k in list(_daily_ai_costs.keys()):
+        if k < cutoff:
+            del _daily_ai_costs[k]
 
 
 class AIChatMessage(BaseModel):
     role: str  # "user" | "assistant" | "system"
-    content: str
+    content: Union[str, list]  # str for text, list for multimodal (images)
 
 
 class AIChatRequest(BaseModel):
     model: str
     messages: list[AIChatMessage]
     system_prompt: str = ""
+    user_id: str = ""  # used to check membership status
 
 
 @app.post("/ai/chat")
-async def ai_chat(request: AIChatRequest):
-    """Proxy AI chat to Vercel AI Gateway (or Anthropic directly as fallback)."""
+async def ai_chat(req: AIChatRequest, db: Session = Depends(get_db)):
+    """Proxy AI chat to Vercel AI Gateway."""
+    is_member = False
+    user = None
+    if req.user_id:
+        try:
+            user = db.query(User).filter(User.user_id == req.user_id).first()
+            is_member = bool(getattr(user, "is_member", False))
+        except Exception:
+            pass
+
+    if not is_member:
+        # Platform-wide safety net
+        if _get_daily_cost() >= DAILY_AI_LIMIT_USD:
+            raise HTTPException(
+                status_code=402,
+                detail={
+                    "code": "DAILY_LIMIT_EXCEEDED",
+                    "message": f"Platform AI credit limit of ${DAILY_AI_LIMIT_USD:.0f}/day has been reached.",
+                    "limit_usd": DAILY_AI_LIMIT_USD,
+                    "used_usd": round(_get_daily_cost(), 4),
+                },
+            )
+        # Per-user credit check
+        if user is not None:
+            credits = getattr(user, "credits_cents", 0) or 0
+            if credits <= 0:
+                is_anonymous = not bool(getattr(user, "auth0_sub", None))
+                raise HTTPException(
+                    status_code=402,
+                    detail={
+                        "code": "NO_CREDITS",
+                        "is_anonymous": is_anonymous,
+                        "message": (
+                            "Sign in to get $5 in free AI credits."
+                            if is_anonymous
+                            else "You've used all your AI credits. Buy more to continue."
+                        ),
+                        "credits_cents": 0,
+                    },
+                )
+
     api_key = os.getenv("GATEWAY_API_KEY", "")
     if not api_key:
         raise HTTPException(status_code=503, detail="AI Gateway API key not configured on server.")
 
     messages = []
-    if request.system_prompt:
-        messages.append({"role": "system", "content": request.system_prompt})
-    messages.extend([{"role": m.role, "content": m.content} for m in request.messages])
+    if req.system_prompt:
+        messages.append({"role": "system", "content": req.system_prompt})
+    messages.extend([{"role": m.role, "content": m.content} for m in req.messages])
 
     try:
         async with httpx.AsyncClient(timeout=60.0) as client:
@@ -271,19 +425,217 @@ async def ai_chat(request: AIChatRequest):
                     "Authorization": f"Bearer {api_key}",
                     "Content-Type": "application/json",
                 },
-                json={"model": request.model, "messages": messages},
+                json={"model": req.model, "messages": messages},
             )
             if response.status_code != 200:
                 logging.error(f"Gateway error {response.status_code}: {response.text}")
                 raise HTTPException(status_code=502, detail=f"Gateway returned {response.status_code}")
             data = response.json()
             content = data["choices"][0]["message"]["content"]
-            return {"content": content}
+            usage = data.get("usage", {})
+            total_tokens = usage.get("total_tokens", 200)
+            _add_daily_cost(total_tokens)
+
+            # Deduct per-user credits (members are exempt)
+            credits_remaining = None
+            if not is_member and user is not None:
+                cost = _calc_user_cost_cents(total_tokens)
+                try:
+                    user.credits_cents = max(0, (getattr(user, "credits_cents", 0) or 0) - cost)
+                    db.commit()
+                    credits_remaining = user.credits_cents
+                except Exception as e:
+                    logging.error(f"Credits deduction error: {e}")
+
+            return {"content": content, "credits_cents": credits_remaining}
     except httpx.TimeoutException:
         raise HTTPException(status_code=504, detail="AI request timed out.")
     except httpx.RequestError as e:
         logging.error(f"AI gateway request error: {e}")
         raise HTTPException(status_code=502, detail="Failed to reach AI gateway.")
+
+
+# ── Auth0 login ───────────────────────────────────────────────────────────────
+
+class AuthLoginRequest(BaseModel):
+    token: str           # raw Auth0 ID token (JWT)
+    username: str = ""   # display name from Auth0 profile
+
+
+@app.post("/auth/login")
+async def auth_login(req: AuthLoginRequest, db: Session = Depends(get_db)):
+    """Exchange an Auth0 ID token for a chat user_id. Creates the user on first login."""
+    payload = await verify_id_token(req.token)
+    sub = payload.get("sub")  # e.g. "auth0|abc123" or "google-oauth2|123"
+    if not sub:
+        raise HTTPException(status_code=401, detail="Token missing 'sub' claim.")
+
+    # Derive display name: prefer explicit param, then Auth0 profile fields
+    display_name = (
+        req.username.strip()
+        or payload.get("nickname")
+        or payload.get("name")
+        or (payload.get("email") or "").split("@")[0]
+        or f"user_{uuid.uuid4().hex[:6]}"
+    )
+
+    try:
+        # Find existing user by auth0_sub
+        user = db.query(User).filter(User.auth0_sub == sub).first()
+        if user:
+            # Update username in case it changed in Auth0
+            if req.username.strip() and user.username != display_name:
+                user.username = display_name
+                db.commit()
+        else:
+            user = User(
+                user_id=str(uuid.uuid4()),
+                username=display_name,
+                auth0_sub=sub,
+                is_online=True,
+                connected_at=datetime.utcnow(),
+                credits_cents=NEW_USER_CREDIT_CENTS,  # $5.00 for new registered users
+            )
+            db.add(user)
+            db.commit()
+            db.refresh(user)
+        return {
+            "user_id": user.user_id,
+            "username": user.username,
+            "is_member": user.is_member,
+            "credits_cents": user.credits_cents or 0,
+            "is_anonymous": False,
+        }
+    except (OperationalError, SQLAlchemyError) as e:
+        logging.error(f"DB error in auth_login: {e}")
+        raise HTTPException(status_code=503, detail="Database unavailable.")
+
+
+# ── Stripe membership ─────────────────────────────────────────────────────────
+
+@app.get("/user/{user_id}/credits")
+async def get_user_credits(user_id: str, db: Session = Depends(get_db)):
+    """Return a user's current credit balance and account type."""
+    try:
+        user = db.query(User).filter(User.user_id == user_id).first()
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        return {
+            "credits_cents": getattr(user, "credits_cents", 0) or 0,
+            "is_member": bool(user.is_member),
+            "is_anonymous": not bool(user.auth0_sub),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.error(f"Error fetching credits: {e}")
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+
+class BuyCreditsRequest(BaseModel):
+    user_id: str
+    amount_dollars: int = 5  # minimum purchase $5
+
+
+@app.post("/stripe/buy-credits")
+async def buy_credits(req: BuyCreditsRequest, request: Request):
+    """Create a Stripe one-time Checkout session to top up AI credits."""
+    stripe_key = os.getenv("STRIPE_SECRET_KEY", "")
+    if not stripe_key:
+        raise HTTPException(status_code=503, detail="Payment not configured on server.")
+
+    stripe.api_key = stripe_key
+    origin = request.headers.get("origin", "https://chat.jytech.us")
+    amount_dollars = max(5, min(200, req.amount_dollars))
+    amount_stripe_cents = amount_dollars * 100  # Stripe uses cents
+
+    try:
+        session = stripe.checkout.Session.create(
+            payment_method_types=["card"],
+            line_items=[{
+                "price_data": {
+                    "currency": "usd",
+                    "product_data": {"name": f"SphareChat AI Credits (${amount_dollars})"},
+                    "unit_amount": amount_stripe_cents,
+                },
+                "quantity": 1,
+            }],
+            mode="payment",
+            metadata={"user_id": req.user_id, "credit_cents": str(amount_stripe_cents)},
+            success_url=f"{origin}?credits=success",
+            cancel_url=f"{origin}?credits=cancelled",
+        )
+        return {"checkout_url": session.url}
+    except stripe.StripeError as e:
+        logging.error(f"Stripe buy-credits error: {e}")
+        raise HTTPException(status_code=502, detail="Payment service error.")
+
+
+@app.post("/stripe/checkout")
+async def create_checkout(request: Request):
+    """Create a Stripe Checkout session for membership upgrade."""
+    stripe_key = os.getenv("STRIPE_SECRET_KEY", "")
+    price_id = os.getenv("STRIPE_PRICE_ID", "")
+    if not stripe_key or not price_id:
+        raise HTTPException(status_code=503, detail="Payment not configured on server.")
+
+    stripe.api_key = stripe_key
+    body = await request.json()
+    user_id = body.get("user_id", "")
+    origin = request.headers.get("origin", "https://chat.jytech.us")
+
+    try:
+        session = stripe.checkout.Session.create(
+            payment_method_types=["card"],
+            line_items=[{"price": price_id, "quantity": 1}],
+            mode="subscription",
+            metadata={"user_id": user_id},
+            success_url=f"{origin}?membership=success",
+            cancel_url=f"{origin}?membership=cancelled",
+        )
+        return {"checkout_url": session.url}
+    except stripe.StripeError as e:
+        logging.error(f"Stripe error: {e}")
+        raise HTTPException(status_code=502, detail="Payment service error.")
+
+
+@app.post("/stripe/webhook")
+async def stripe_webhook(request: Request, db: Session = Depends(get_db)):
+    """Handle Stripe webhook events (e.g. successful payment → grant membership)."""
+    payload = await request.body()
+    sig = request.headers.get("stripe-signature", "")
+    webhook_secret = os.getenv("STRIPE_WEBHOOK_SECRET", "")
+
+    try:
+        event = stripe.Webhook.construct_event(payload, sig, webhook_secret)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid payload")
+    except stripe.SignatureVerificationError:
+        raise HTTPException(status_code=400, detail="Invalid signature")
+
+    if event["type"] == "checkout.session.completed":
+        session_obj = event["data"]["object"]
+        meta = session_obj.get("metadata") or {}
+        user_id = meta.get("user_id")
+        credit_cents_str = meta.get("credit_cents")  # present for credit purchases, absent for subscriptions
+        if user_id:
+            try:
+                user = db.query(User).filter(User.user_id == user_id).first()
+                if user:
+                    if credit_cents_str:
+                        # One-time credit top-up
+                        add = int(credit_cents_str)
+                        user.credits_cents = (getattr(user, "credits_cents", 0) or 0) + add
+                        logging.info(f"Added {add} credits to user {user_id}")
+                    else:
+                        # Membership subscription
+                        user.is_member = True
+                        logging.info(f"Membership granted to user {user_id}")
+                    db.commit()
+            except Exception as e:
+                logging.error(f"DB error processing payment: {e}")
+
+    return {"received": True}
 
 
 if __name__ == "__main__":

@@ -1,4 +1,13 @@
 import { useState, useEffect, useRef } from 'react';
+import { useAuth0 } from '@auth0/auth0-react';
+import mammoth from 'mammoth';
+import * as pdfjsLib from 'pdfjs-dist';
+pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
+  'pdfjs-dist/build/pdf.worker.min.mjs',
+  import.meta.url,
+).toString();
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import './App.css';
 import { saveMessage, loadMessages, clearMessages, getStorageUsage } from './messageStore';
 
@@ -49,6 +58,19 @@ function saveAgentsToStorage(agents) {
 }
 
 function App() {
+  const {
+    loginWithRedirect,
+    logout: auth0Logout,
+    user: auth0User,
+    isAuthenticated,
+    isLoading: auth0Loading,
+    error: auth0Error,
+    getIdTokenClaims,
+  } = useAuth0();
+
+  // Temporary debug — remove after fixing auth issue
+  console.log('[Auth0]', { isAuthenticated, auth0Loading, auth0Error, auth0User: auth0User?.email });
+
   // Auth & connection
   const [username, setUsername] = useState(() => localStorage.getItem('chat_username') || '');
   const [userId, setUserId] = useState(() => localStorage.getItem('chat_userId') || null);
@@ -65,10 +87,16 @@ function App() {
   const [unreadCounts, setUnreadCounts] = useState({});
   const [pendingAttachment, setPendingAttachment] = useState(null);
   const [aiLoading, setAiLoading] = useState(false);
+  const [upgradeReason, setUpgradeReason] = useState(null); // null | { code, isAnonymous }
+  const [userCredits, setUserCredits] = useState(null);    // cents, null = not yet loaded
+  const [userIsAnonymous, setUserIsAnonymous] = useState(true);
+  const [userPicture, setUserPicture] = useState(null);    // Google/social profile pic URL
+  const [userEmail, setUserEmail] = useState(null);
 
   // Sidebar
   const [activeTab, setActiveTab] = useState('users'); // 'users' | 'ai' | 'agents'
   const [showSettings, setShowSettings] = useState(false);
+  const [showProfile, setShowProfile] = useState(false);
 
   // AI Models
   const [allModels, setAllModels] = useState([]);
@@ -94,13 +122,80 @@ function App() {
   const messagesEndRef = useRef(null);
   const reconnectTimeoutRef = useRef(null);
   const shouldReconnect = useRef(true);
+  const hasEverConnectedRef = useRef(false); // stays true after first successful WS open
   const isConnectingRef = useRef(false);
+  const wsUserIdRef = useRef(null); // tracks which user_id the current WS is connected with
   const selectedUserRef = useRef(null);
   const soundEnabledRef = useRef(soundEnabled);
   const fileInputRef = useRef(null);
   const messageInputRef = useRef(null);
 
   // ── Effects ─────────────────────────────────────────────────────────────────
+
+  // Fetch user credit balance from backend
+  const fetchCredits = async (uid) => {
+    try {
+      const res = await fetch(`${API_URL}/user/${uid}/credits`);
+      if (!res.ok) return;
+      const data = await res.json();
+      setUserCredits(data.credits_cents);
+      setUserIsAnonymous(data.is_anonymous);
+    } catch { /* non-critical */ }
+  };
+
+  // Membership / credits success redirect
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('membership') === 'success') {
+      window.history.replaceState({}, '', window.location.pathname);
+      setTimeout(() => alert('🎉 Welcome, member! You now have unlimited AI access.'), 300);
+    }
+    if (params.get('credits') === 'success') {
+      window.history.replaceState({}, '', window.location.pathname);
+      const uid = localStorage.getItem('chat_userId');
+      if (uid) fetchCredits(uid);
+      setTimeout(() => alert('✅ Credits added! Your balance has been updated.'), 300);
+    }
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Auth0 → backend sync: exchange ID token for a stable chat user_id
+  useEffect(() => {
+    if (!isAuthenticated || !auth0User) return;
+    const sync = async () => {
+      try {
+        const claims = await getIdTokenClaims();
+        const idToken = claims?.__raw;
+        if (!idToken) return;
+        const displayName =
+          auth0User.nickname || auth0User.name || auth0User.email?.split('@')[0] || '';
+        const res = await fetch(`${API_URL}/auth/login`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ token: idToken, username: displayName }),
+        });
+        if (!res.ok) { console.error('Auth login failed', await res.text()); return; }
+        const data = await res.json();
+        setUserId(data.user_id);
+        setUsername(data.username);
+        setUserCredits(data.credits_cents ?? null);
+        setUserIsAnonymous(false);
+        setUserPicture(auth0User.picture || null);
+        setUserEmail(auth0User.email || null);
+        localStorage.setItem('chat_userId', data.user_id);
+        localStorage.setItem('chat_username', data.username);
+        // Reconnect if: not already connecting AND (no connection yet OR connected with a different user_id)
+        if (!isConnectingRef.current && wsUserIdRef.current !== data.user_id) {
+          connectWebSocket(data.user_id, data.username);
+        }
+      } catch (err) { console.error('Auth sync error:', err); }
+    };
+    sync();
+  }, [isAuthenticated, auth0User]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Fetch credits whenever userId is first set (handles auto-connect path)
+  useEffect(() => {
+    if (userId && userCredits === null) fetchCredits(userId);
+  }, [userId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Health check
   useEffect(() => {
@@ -115,14 +210,14 @@ function App() {
     return () => clearInterval(id);
   }, []);
 
-  // Auto-connect
+  // Auto-connect using cached credentials on mount
   useEffect(() => {
     const uid = localStorage.getItem('chat_userId');
     const uname = localStorage.getItem('chat_username');
     if (uid && uname && !isConnectingRef.current && !ws.current) {
       connectWebSocket(uid, uname);
     }
-  }, []);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Load persisted messages
   useEffect(() => {
@@ -232,7 +327,12 @@ function App() {
     if (isConnectingRef.current) return;
     if (reconnectTimeoutRef.current) { clearTimeout(reconnectTimeoutRef.current); reconnectTimeoutRef.current = null; }
     if (ws.current && ws.current.readyState !== WebSocket.CLOSED) {
-      shouldReconnect.current = false;
+      // Null out all handlers before closing so the old socket's onclose
+      // doesn't fire and trigger a spurious reconnect (race condition).
+      ws.current.onopen = null;
+      ws.current.onmessage = null;
+      ws.current.onclose = null;
+      ws.current.onerror = null;
       ws.current.close();
       ws.current = null;
     }
@@ -242,6 +342,8 @@ function App() {
 
     ws.current.onopen = () => {
       isConnectingRef.current = false;
+      wsUserIdRef.current = uid;
+      hasEverConnectedRef.current = true;
       setIsConnected(true);
       setIsReconnecting(false);
       setReconnectAttempts(0);
@@ -307,7 +409,14 @@ function App() {
   useEffect(() => () => {
     shouldReconnect.current = false;
     if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current);
-    if (ws.current) ws.current.close();
+    if (ws.current) {
+      ws.current.onopen = null;
+      ws.current.onmessage = null;
+      ws.current.onclose = null;
+      ws.current.onerror = null;
+      ws.current.close();
+      ws.current = null;
+    }
   }, []);
 
   // ── Messaging ────────────────────────────────────────────────────────────────
@@ -344,11 +453,48 @@ function App() {
             (m.from_user === userId && m.to_user === selectedUser.user_id) ||
             (m.from_user === selectedUser.user_id && m.to_user === userId)
           )
-          .map(m => ({
-            role: m.from_user === userId ? 'user' : 'assistant',
-            content: m.content || '',
-          }));
-        history.push({ role: 'user', content: text || pendingAttachment?.name || '' });
+          .map(m => {
+            // Re-attach image data for past messages so AI has full context
+            if (m.attachment?.type?.startsWith('image/') && m.attachment.data) {
+              const parts = [];
+              if (m.content) parts.push({ type: 'text', text: m.content });
+              parts.push({ type: 'image_url', image_url: { url: m.attachment.data } });
+              return { role: m.from_user === userId ? 'user' : 'assistant', content: parts };
+            }
+            return { role: m.from_user === userId ? 'user' : 'assistant', content: m.content || '' };
+          });
+
+        // Build the new user turn with attachment if present
+        let newUserContent;
+        if (pendingAttachment) {
+          if (pendingAttachment.type?.startsWith('image/')) {
+            // Vision-capable models: send image as multimodal content block
+            const parts = [];
+            if (text) parts.push({ type: 'text', text });
+            parts.push({ type: 'image_url', image_url: { url: pendingAttachment.data } });
+            newUserContent = parts;
+          } else if (pendingAttachment.extractedText !== undefined) {
+            // DOCX with pre-extracted text (via mammoth)
+            const excerpt = pendingAttachment.extractedText
+              ? `${text ? text + '\n\n' : ''}[Document: ${pendingAttachment.name}]\n${pendingAttachment.extractedText}`
+              : `${text ? text + '\n\n' : ''}[Document: ${pendingAttachment.name} — no readable text found]`;
+            newUserContent = excerpt;
+          } else if (pendingAttachment.type === 'text/plain') {
+            // Decode base64 text and include inline
+            try {
+              const decoded = atob(pendingAttachment.data.split(',')[1]);
+              newUserContent = `${text ? text + '\n\n' : ''}[File: ${pendingAttachment.name}]\n${decoded}`;
+            } catch {
+              newUserContent = `${text ? text + '\n\n' : ''}[File attached: ${pendingAttachment.name}]`;
+            }
+          } else {
+            // Binary file (PDF, etc.) — AI cannot read binary directly
+            newUserContent = `${text ? text + '\n\n' : ''}[Attached file: ${pendingAttachment.name} — binary format, cannot be read directly. Please paste the text content.]`;
+          }
+        } else {
+          newUserContent = text;
+        }
+        history.push({ role: 'user', content: newUserContent });
 
         const res = await fetch(`${API_URL}/ai/chat`, {
           method: 'POST',
@@ -357,11 +503,26 @@ function App() {
             model: selectedUser.model,
             messages: history,
             system_prompt: selectedUser.systemPrompt || '',
+            user_id: userId,
           }),
         });
 
         const data = await res.json();
-        if (!res.ok) throw new Error(data.detail || 'AI error');
+        if (res.status === 402) {
+          const detail = data.detail || {};
+          setUpgradeReason({
+            code: detail.code || 'NO_CREDITS',
+            isAnonymous: detail.is_anonymous ?? userIsAnonymous,
+          });
+          setMessages(prev => prev.slice(0, -1)); // remove optimistic user message
+          return;
+        }
+        if (!res.ok) throw new Error(typeof data.detail === 'string' ? data.detail : (data.detail?.message || 'AI error'));
+
+        // Update credit balance from response
+        if (data.credits_cents !== null && data.credits_cents !== undefined) {
+          setUserCredits(data.credits_cents);
+        }
 
         const aiMsg = {
           type: 'chat',
@@ -449,10 +610,65 @@ function App() {
 
   // ── File attachment ──────────────────────────────────────────────────────────
 
-  const handleFileSelect = (e) => {
+  const extractPdfText = async (arrayBuffer) => {
+    const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+    const pages = [];
+    for (let i = 1; i <= pdf.numPages; i++) {
+      const page = await pdf.getPage(i);
+      const content = await page.getTextContent();
+      pages.push(content.items.map(item => item.str).join(' '));
+    }
+    return pages.join('\n\n').trim();
+  };
+
+  const handleFileSelect = async (e) => {
     const file = e.target.files[0];
     if (!file) return;
     if (file.size > 5 * 1024 * 1024) { alert('File too large. Maximum 5MB.'); e.target.value = ''; return; }
+
+    const isDocx = file.name.toLowerCase().endsWith('.docx') ||
+      file.type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+
+    const isPdf = file.name.toLowerCase().endsWith('.pdf') || file.type === 'application/pdf';
+
+    if (isDocx) {
+      // Extract plain text from DOCX using mammoth
+      try {
+        const arrayBuffer = await file.arrayBuffer();
+        const result = await mammoth.extractRawText({ arrayBuffer });
+        const extractedText = result.value?.trim() || '';
+        setPendingAttachment({ name: file.name, type: file.type, extractedText, data: null });
+      } catch (err) {
+        console.error('DOCX extraction failed:', err);
+        alert('Could not read the Word document. Please copy-paste the content instead.');
+        e.target.value = '';
+      }
+      return;
+    }
+
+    if (isPdf) {
+      try {
+        const arrayBuffer = await file.arrayBuffer();
+        const extractedText = await extractPdfText(arrayBuffer);
+        if (!extractedText) {
+          // Scanned PDF — no selectable text
+          setPendingAttachment({
+            name: file.name, type: file.type,
+            extractedText: '[Scanned PDF — no selectable text could be extracted. Please copy-paste the content manually.]',
+            data: null,
+          });
+        } else {
+          setPendingAttachment({ name: file.name, type: file.type, extractedText, data: null });
+        }
+      } catch (err) {
+        console.error('PDF extraction failed:', err);
+        alert('Could not read the PDF. Please copy-paste the content instead.');
+        e.target.value = '';
+      }
+      return;
+    }
+
+    // All other files: read as data URL (images get base64 for display + AI; text decoded inline)
     const reader = new FileReader();
     reader.onload = ev => setPendingAttachment({ name: file.name, type: file.type, data: ev.target.result });
     reader.readAsDataURL(file);
@@ -496,6 +712,7 @@ function App() {
     setUnreadCounts({}); setShowSettings(false); setPendingAttachment(null);
     localStorage.removeItem('chat_userId');
     localStorage.removeItem('chat_username');
+    auth0Logout({ logoutParams: { returnTo: window.location.origin } });
   };
 
   const handleClearHistory = async () => {
@@ -517,6 +734,46 @@ function App() {
   };
 
   const formatBytes = (b) => b < 1024 ? `${b} B` : b < 1048576 ? `${(b / 1024).toFixed(1)} KB` : `${(b / 1048576).toFixed(2)} MB`;
+
+  const handleUpgradeMembership = async () => {
+    try {
+      const res = await fetch(`${API_URL}/stripe/checkout`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ user_id: userId }),
+      });
+      const data = await res.json();
+      if (data.checkout_url) window.location.href = data.checkout_url;
+      else throw new Error(data.detail || 'No checkout URL');
+    } catch (err) {
+      console.error('Checkout error:', err);
+      alert('Unable to start checkout. Please try again.');
+    }
+  };
+
+  const handleRegister = () => {
+    loginWithRedirect({ authorizationParams: { screen_hint: 'signup' } });
+  };
+
+  const handleSignIn = () => {
+    loginWithRedirect();
+  };
+
+  const handleBuyCredits = async (amountDollars = 5) => {
+    try {
+      const res = await fetch(`${API_URL}/stripe/buy-credits`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ user_id: userId, amount_dollars: amountDollars }),
+      });
+      const data = await res.json();
+      if (data.checkout_url) window.location.href = data.checkout_url;
+      else throw new Error(data.detail || 'No checkout URL');
+    } catch (err) {
+      console.error('Buy credits error:', err);
+      alert('Unable to start checkout. Please try again.');
+    }
+  };
 
   // ── Derived ──────────────────────────────────────────────────────────────────
 
@@ -541,7 +798,8 @@ function App() {
 
   // ── Login screen ─────────────────────────────────────────────────────────────
 
-  if (!userId) {
+  // Auth0 loading or not yet authenticated
+  if (auth0Loading || (!isAuthenticated && !userId)) {
     return (
       <div className="login-container">
         <div className="login-box">
@@ -552,18 +810,20 @@ function App() {
             {serverStatus === 'online' && 'Server online'}
             {serverStatus === 'offline' && 'Server offline — please try later'}
           </div>
-          <p>Enter a username or leave blank for a random one</p>
-          <input
-            type="text"
-            value={username}
-            onChange={e => setUsername(e.target.value)}
-            placeholder="Username (optional)"
-            onKeyPress={e => e.key === 'Enter' && handleJoin()}
-            className="username-input"
-          />
-          <button onClick={handleJoin} className="join-button" disabled={serverStatus === 'offline'}>
-            Join Chat
-          </button>
+          {auth0Loading ? (
+            <p className="auth-loading">Checking session...</p>
+          ) : (
+            <>
+              <p>Sign in to start chatting</p>
+              <button
+                className="join-button auth0-login-btn"
+                onClick={() => loginWithRedirect()}
+                disabled={serverStatus === 'offline'}
+              >
+                Sign in
+              </button>
+            </>
+          )}
         </div>
       </div>
     );
@@ -573,7 +833,7 @@ function App() {
 
   return (
     <div className="app-container">
-      {!isConnected && (
+      {!isConnected && (hasEverConnectedRef.current || reconnectAttempts > 0) && (
         <div className="reconnecting-banner">
           {reconnectAttempts > 0
             ? <>🔄 Reconnecting... (Attempt {reconnectAttempts}/10)</>
@@ -585,8 +845,28 @@ function App() {
       <div className="sidebar">
         <div className="sidebar-header">
           <div className="sidebar-header-top">
+            {/* Avatar — opens profile modal (authenticated) or sign-in (guest) */}
+            <button
+              className="header-avatar-btn"
+              onClick={() => isAuthenticated ? setShowProfile(true) : handleSignIn()}
+              title={isAuthenticated ? 'View profile' : 'Sign in / Register'}
+            >
+              {userPicture ? (
+                <img src={userPicture} alt={username} className="header-avatar-img" referrerPolicy="no-referrer" />
+              ) : (
+                <div className="header-avatar-initials">{username.charAt(0).toUpperCase()}</div>
+              )}
+            </button>
             <h2>SphareChat</h2>
             <div className="sidebar-header-actions">
+              {userCredits !== null && (
+                <span
+                  className={`credits-badge-mini ${userCredits < 20 ? 'credits-low' : ''}`}
+                  title="AI credits"
+                >
+                  ${(userCredits / 100).toFixed(2)}
+                </span>
+              )}
               <button className={`icon-button ${soundEnabled ? '' : 'muted'}`} onClick={toggleSound}
                 title={soundEnabled ? 'Mute' : 'Unmute'}>
                 {soundEnabled ? '🔔' : '🔕'}
@@ -595,12 +875,31 @@ function App() {
                 onClick={() => setShowSettings(v => !v)} title="Settings">⚙️</button>
             </div>
           </div>
-          <div className="user-info-badge">
-            <span className="user-badge">{username}</span>
-            <span className="user-id" title="Your User ID">{userId}</span>
-            <button onClick={handleLogout} className="logout-button">Logout</button>
-          </div>
         </div>
+
+        {/* Auth0 error display */}
+        {auth0Error && (
+          <div style={{margin:'0.5rem 1rem',padding:'0.5rem',background:'#fee2e2',borderRadius:'8px',fontSize:'0.75rem',color:'#dc2626'}}>
+            Auth error: {auth0Error.message} {auth0Error.error_description || ''}
+          </div>
+        )}
+
+        {/* Registration prompt — only for confirmed anonymous unauthenticated users */}
+        {!auth0Loading && !isAuthenticated && userIsAnonymous && (
+          <div className="register-prompt">
+            <div className="register-prompt-body">
+              <span className="register-prompt-icon">🎁</span>
+              <div>
+                <div className="register-prompt-title">Get $5 free AI credits</div>
+                <div className="register-prompt-sub">Register with your email — verified &amp; free</div>
+              </div>
+            </div>
+            <div className="register-prompt-actions">
+              <button className="register-email-btn" onClick={handleRegister}>Register with Email</button>
+              <button className="signin-link-btn" onClick={handleSignIn}>Already have an account?</button>
+            </div>
+          </div>
+        )}
 
         {showSettings && (
           <div className="settings-panel">
@@ -768,7 +1067,11 @@ function App() {
             <div className="messages-container">
               {getMessagesForCurrentChat().map((msg, i) => (
                 <div key={i} className={`message ${msg.from_user === userId ? 'sent' : 'received'} ${msg.isError ? 'error-msg' : ''}`}>
-                  {msg.content && <div className="message-content">{msg.content}</div>}
+                  {msg.content && (
+                    <div className="message-content markdown-body">
+                      <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.content}</ReactMarkdown>
+                    </div>
+                  )}
                   {msg.attachment && (
                     <div className="message-attachment">
                       {msg.attachment.type?.startsWith('image/') ? (
@@ -793,46 +1096,51 @@ function App() {
               <div ref={messagesEndRef} />
             </div>
 
-            {pendingAttachment && (
-              <div className="pending-attachment-bar">
-                {pendingAttachment.type?.startsWith('image/') ? (
-                  <img src={pendingAttachment.data} alt={pendingAttachment.name} className="pending-attachment-thumb" />
-                ) : (
-                  <span className="pending-attachment-name">📎 {pendingAttachment.name}</span>
-                )}
-                <button className="remove-attachment-btn" onClick={() => { setPendingAttachment(null); if (fileInputRef.current) fileInputRef.current.value = ''; }}>×</button>
-              </div>
-            )}
+            <div className="input-area">
+              {pendingAttachment && (
+                <div className="pending-attachment-bar">
+                  {pendingAttachment.type?.startsWith('image/') && pendingAttachment.data ? (
+                    <img src={pendingAttachment.data} alt={pendingAttachment.name} className="pending-attachment-thumb" />
+                  ) : pendingAttachment.extractedText !== undefined ? (
+                    <span className="pending-attachment-name">📄 {pendingAttachment.name} <span className="extracted-ok">text extracted</span></span>
+                  ) : (
+                    <span className="pending-attachment-name">📎 {pendingAttachment.name}</span>
+                  )}
+                  <button className="remove-attachment-btn" onClick={() => { setPendingAttachment(null); if (fileInputRef.current) fileInputRef.current.value = ''; }}>×</button>
+                </div>
+              )}
 
-            {/* @mention dropdown */}
-            {mentionCandidates.length > 0 && (
-              <div className="mention-dropdown">
-                {mentionCandidates.map((c, i) => (
-                  <div key={i} className="mention-item" onClick={() => applyMention(c)}>
-                    <span className="mention-type-badge">{c.type === 'ai' ? '🤖' : c.type === 'agent' ? '🛠' : '👤'}</span>
-                    <span className="mention-label">{c.label}</span>
-                  </div>
-                ))}
-              </div>
-            )}
+              {/* @mention dropdown — positioned relative to .input-area */}
+              {mentionCandidates.length > 0 && (
+                <div className="mention-dropdown">
+                  {mentionCandidates.map((c, i) => (
+                    <div key={i} className="mention-item" onClick={() => applyMention(c)}>
+                      <span className="mention-type-badge">{c.type === 'ai' ? '🤖' : c.type === 'agent' ? '🛠' : '👤'}</span>
+                      <span className="mention-label">{c.label}</span>
+                      {c.type === 'ai' && <span className="mention-sublabel">{c.model?.provider}</span>}
+                    </div>
+                  ))}
+                </div>
+              )}
 
-            <div className="message-input-container">
-              <input ref={fileInputRef} type="file" onChange={handleFileSelect} style={{ display: 'none' }}
-                accept="image/*,application/pdf,.doc,.docx,.txt,.zip" />
-              <button className="attach-button" onClick={() => fileInputRef.current?.click()} title="Attach file">📎</button>
-              <input
-                ref={messageInputRef}
-                type="text"
-                value={messageInput}
-                onChange={handleInputChange}
-                onKeyPress={handleKeyPress}
-                placeholder={`Message ${selectedUser.username}... (use @ to mention)`}
-                className="message-input"
-              />
-              <button onClick={sendMessage} className="send-button"
-                disabled={(!messageInput.trim() && !pendingAttachment) || aiLoading}>
-                {aiLoading ? '...' : 'Send'}
-              </button>
+              <div className="message-input-container">
+                <input ref={fileInputRef} type="file" onChange={handleFileSelect} style={{ display: 'none' }}
+                  accept="image/*,application/pdf,.doc,.docx,.txt" />
+                <button className="attach-button" onClick={() => fileInputRef.current?.click()} title="Attach file">📎</button>
+                <input
+                  ref={messageInputRef}
+                  type="text"
+                  value={messageInput}
+                  onChange={handleInputChange}
+                  onKeyPress={handleKeyPress}
+                  placeholder={`Message ${selectedUser.username}... (use @ to mention)`}
+                  className="message-input"
+                />
+                <button onClick={sendMessage} className="send-button"
+                  disabled={(!messageInput.trim() && !pendingAttachment) || aiLoading}>
+                  {aiLoading ? '...' : 'Send'}
+                </button>
+              </div>
             </div>
           </>
         ) : (
@@ -842,6 +1150,93 @@ function App() {
           </div>
         )}
       </div>
+
+      {/* Profile modal */}
+      {showProfile && (
+        <div className="modal-overlay" onClick={() => setShowProfile(false)}>
+          <div className="profile-modal" onClick={e => e.stopPropagation()}>
+            <button className="modal-close-btn" onClick={() => setShowProfile(false)}>✕</button>
+            <div className="profile-modal-avatar">
+              {userPicture ? (
+                <img src={userPicture} alt={username} referrerPolicy="no-referrer" />
+              ) : (
+                <div className="profile-modal-initials">{username.charAt(0).toUpperCase()}</div>
+              )}
+            </div>
+            <div className="profile-modal-name">{username}</div>
+            {userEmail && <div className="profile-modal-email">{userEmail}</div>}
+            <div className="profile-modal-badge">{userIsAnonymous ? 'Anonymous' : 'Registered'}</div>
+
+            <div className="profile-modal-credits">
+              <div className="profile-modal-credits-label">AI Credits</div>
+              <div className={`profile-modal-credits-value ${userCredits !== null && userCredits < 20 ? 'credits-low' : ''}`}>
+                ${userCredits !== null ? (userCredits / 100).toFixed(2) : '—'}
+              </div>
+              {!userIsAnonymous && (
+                <button className="upgrade-btn" style={{marginTop:'0.5rem'}} onClick={() => { setShowProfile(false); handleBuyCredits(5); }}>
+                  Buy More Credits
+                </button>
+              )}
+            </div>
+
+            <div className="profile-modal-actions">
+              <button className="logout-button" onClick={() => { setShowProfile(false); handleLogout(); }}>Sign out</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Credit / upgrade modal */}
+      {upgradeReason && (
+        <div className="modal-overlay" onClick={() => setUpgradeReason(null)}>
+          <div className="upgrade-modal" onClick={e => e.stopPropagation()}>
+            {upgradeReason.code === 'DAILY_LIMIT_EXCEEDED' ? (
+              <>
+                <div className="upgrade-modal-icon">⏳</div>
+                <h3>Platform Limit Reached</h3>
+                <p>The platform's shared AI credit ($10/day) has been used up. Come back tomorrow — or buy your own credits for uninterrupted access.</p>
+                <div className="upgrade-modal-actions">
+                  <button className="upgrade-btn" onClick={() => handleBuyCredits(5)}>Buy $5 Credits</button>
+                  <button className="dismiss-btn" onClick={() => setUpgradeReason(null)}>Maybe Later</button>
+                </div>
+              </>
+            ) : upgradeReason.isAnonymous ? (
+              <>
+                <div className="upgrade-modal-icon">🎁</div>
+                <h3>You've Used Your Free Credit</h3>
+                <p>Anonymous users get <strong>$1</strong> in free AI credits. Sign in to get <strong>$5 free credits</strong> — no payment required.</p>
+                <div className="upgrade-modal-actions">
+                  <button className="upgrade-btn" onClick={() => {
+                    setUpgradeReason(null);
+                    loginWithRedirect({ authorizationParams: { screen_hint: 'signup' } });
+                  }}>
+                    Register Free (Email)
+                  </button>
+                  <button className="secondary-upgrade-btn" onClick={() => handleBuyCredits(5)}>Buy Credits Instead</button>
+                  <button className="dismiss-btn" onClick={() => setUpgradeReason(null)}>Maybe Later</button>
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="upgrade-modal-icon">💳</div>
+                <h3>Out of AI Credits</h3>
+                <p>Your credit balance is empty. Top up to keep chatting with AI — or upgrade to a membership for unlimited access.</p>
+                <div className="credit-packages">
+                  {[5, 10, 20].map(amt => (
+                    <button key={amt} className="credit-package-btn" onClick={() => handleBuyCredits(amt)}>
+                      ${amt}
+                    </button>
+                  ))}
+                </div>
+                <div className="upgrade-modal-actions">
+                  <button className="upgrade-btn" onClick={handleUpgradeMembership}>Unlimited Membership</button>
+                  <button className="dismiss-btn" onClick={() => setUpgradeReason(null)}>Maybe Later</button>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -84,6 +84,19 @@ body {
   transform: none;
 }
 
+.auth-loading {
+  color: #999;
+  font-size: 0.875rem;
+  margin: 1rem 0;
+}
+
+.auth0-login-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+}
+
 /* Server Status Indicator */
 .server-status {
   display: flex;
@@ -180,9 +193,59 @@ body {
 .sidebar-header-top {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  margin-bottom: 0.5rem;
+  gap: 0.6rem;
 }
+
+.sidebar-header-top h2 { flex: 1; }
+
+/* Header avatar */
+.header-avatar-btn {
+  background: none;
+  border: 2px solid rgba(255,255,255,0.4);
+  border-radius: 50%;
+  padding: 0;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: border-color 0.15s, transform 0.15s;
+}
+
+.header-avatar-btn:hover {
+  border-color: rgba(255,255,255,0.8);
+  transform: scale(1.05);
+}
+
+.header-avatar-img {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  object-fit: cover;
+  display: block;
+}
+
+.header-avatar-initials {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: rgba(255,255,255,0.25);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 700;
+  font-size: 1rem;
+  color: white;
+}
+
+.credits-badge-mini {
+  font-size: 0.7rem;
+  font-weight: 700;
+  color: rgba(255,255,255,0.9);
+  background: rgba(255,255,255,0.18);
+  padding: 0.15rem 0.5rem;
+  border-radius: 10px;
+  white-space: nowrap;
+}
+
+.credits-badge-mini.credits-low { color: #fca5a5; background: rgba(220,38,38,0.25); }
 
 .sidebar-header h2 {
   font-size: 1.25rem;
@@ -293,8 +356,107 @@ body {
 
 .user-info-badge {
   display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.5rem 0;
+}
+
+.anon-signin-area {
+  display: flex;
   flex-direction: column;
-  gap: 0.5rem;
+  gap: 0.2rem;
+}
+
+.user-avatar-img {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  object-fit: cover;
+  border: 2px solid rgba(255, 255, 255, 0.4);
+  flex-shrink: 0;
+}
+
+.user-avatar-initials {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.25);
+  border: 2px solid rgba(255, 255, 255, 0.4);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 700;
+  font-size: 1.1rem;
+  color: white;
+  flex-shrink: 0;
+}
+
+/* ── Profile card (authenticated users) ── */
+.profile-card {
+  margin: 0.75rem 1rem;
+  padding: 0.875rem;
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  display: flex;
+  flex-direction: column;
+  gap: 0.625rem;
+}
+
+.profile-card-top {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.profile-avatar-img {
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  object-fit: cover;
+  border: 2px solid rgba(255, 255, 255, 0.5);
+  flex-shrink: 0;
+}
+
+.profile-avatar-initials {
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.25);
+  border: 2px solid rgba(255, 255, 255, 0.4);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 700;
+  font-size: 1.15rem;
+  color: white;
+  flex-shrink: 0;
+}
+
+.profile-info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.profile-name {
+  font-weight: 700;
+  font-size: 0.95rem;
+  color: white;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.profile-email {
+  font-size: 0.75rem;
+  color: rgba(255, 255, 255, 0.7);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .user-badge {
@@ -717,22 +879,27 @@ body {
   border-color: #f5c6c6;
 }
 
+/* Input area wrapper — anchors @mention dropdown just above the input bar */
+.input-area {
+  position: relative;
+  flex-shrink: 0;
+}
+
 /* @mention dropdown */
 .mention-dropdown {
   position: absolute;
-  bottom: calc(100% + 4px);
-  left: 1.25rem;
-  right: 1.25rem;
+  bottom: 100%;
+  left: 0;
+  right: 0;
   background: white;
   border: 1px solid #e0e0e0;
-  border-radius: 10px;
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
+  border-top-left-radius: 10px;
+  border-top-right-radius: 10px;
+  box-shadow: 0 -4px 16px rgba(0, 0, 0, 0.1);
   z-index: 100;
   overflow: hidden;
-}
-
-.chat-container {
-  position: relative; /* needed for mention dropdown absolute positioning */
+  max-height: 280px;
+  overflow-y: auto;
 }
 
 .mention-item {
@@ -757,7 +924,353 @@ body {
 .mention-label {
   color: #333;
   font-weight: 500;
+  flex: 1;
 }
+
+.mention-sublabel {
+  font-size: 0.7rem;
+  color: #aaa;
+  font-weight: 400;
+}
+
+/* Upgrade / Membership modal */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  backdrop-filter: blur(2px);
+}
+
+.profile-modal {
+  background: white;
+  border-radius: 20px;
+  padding: 2rem 1.75rem;
+  width: 320px;
+  max-width: 92vw;
+  text-align: center;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.modal-close-btn {
+  position: absolute;
+  top: 1rem;
+  right: 1rem;
+  background: #f0f0f0;
+  border: none;
+  border-radius: 50%;
+  width: 28px;
+  height: 28px;
+  font-size: 0.85rem;
+  cursor: pointer;
+  color: #555;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.modal-close-btn:hover { background: #e0e0e0; }
+
+.profile-modal-avatar {
+  margin-bottom: 0.5rem;
+}
+
+.profile-modal-avatar img {
+  width: 80px;
+  height: 80px;
+  border-radius: 50%;
+  object-fit: cover;
+  border: 3px solid #7c3aed;
+}
+
+.profile-modal-initials {
+  width: 80px;
+  height: 80px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, #7c3aed, #a855f7);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 2rem;
+  font-weight: 700;
+  color: white;
+}
+
+.profile-modal-name {
+  font-size: 1.2rem;
+  font-weight: 700;
+  color: #1a1a1a;
+}
+
+.profile-modal-email {
+  font-size: 0.85rem;
+  color: #666;
+}
+
+.profile-modal-badge {
+  display: inline-block;
+  padding: 0.2rem 0.75rem;
+  border-radius: 20px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  background: #ede9fe;
+  color: #7c3aed;
+  margin-top: 0.25rem;
+}
+
+.profile-modal-credits {
+  width: 100%;
+  background: #f8f4ff;
+  border-radius: 12px;
+  padding: 1rem;
+  margin-top: 0.5rem;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.profile-modal-credits-label {
+  font-size: 0.8rem;
+  color: #888;
+  font-weight: 500;
+}
+
+.profile-modal-credits-value {
+  font-size: 1.75rem;
+  font-weight: 800;
+  color: #7c3aed;
+}
+
+.profile-modal-credits-value.credits-low { color: #dc2626; }
+
+.profile-modal-actions {
+  width: 100%;
+  margin-top: 0.5rem;
+}
+
+.profile-modal-actions .logout-button {
+  width: 100%;
+  margin-top: 0;
+}
+
+.profile-card-top {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  width: 100%;
+}
+
+/* Clickable avatar with edit hint */
+.profile-avatar-btn {
+  position: relative;
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  flex-shrink: 0;
+  border-radius: 50%;
+}
+
+.profile-avatar-btn:hover .profile-avatar-edit { opacity: 1; }
+
+.profile-avatar-edit {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: rgba(0,0,0,0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1rem;
+  color: white;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+
+/* Arrow button on the right */
+.profile-open-btn {
+  margin-left: auto;
+  background: rgba(255,255,255,0.15);
+  border: none;
+  border-radius: 50%;
+  width: 28px;
+  height: 28px;
+  color: white;
+  font-size: 1.1rem;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  transition: background 0.15s;
+}
+
+.profile-open-btn:hover { background: rgba(255,255,255,0.3); }
+
+.upgrade-modal {
+  background: white;
+  border-radius: 16px;
+  padding: 2rem 2.25rem;
+  max-width: 380px;
+  width: 90%;
+  text-align: center;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.2);
+}
+
+.upgrade-modal-icon {
+  font-size: 2.5rem;
+  margin-bottom: 0.75rem;
+}
+
+.upgrade-modal h3 {
+  font-size: 1.25rem;
+  font-weight: 700;
+  color: #222;
+  margin-bottom: 0.625rem;
+}
+
+.upgrade-modal p {
+  font-size: 0.9rem;
+  color: #666;
+  line-height: 1.55;
+  margin-bottom: 1.5rem;
+}
+
+.upgrade-modal-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 0.625rem;
+}
+
+.upgrade-btn {
+  padding: 0.75rem;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  color: white;
+  border: none;
+  border-radius: 10px;
+  font-size: 0.9375rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: opacity 0.15s;
+}
+
+.upgrade-btn:hover {
+  opacity: 0.9;
+}
+
+.dismiss-btn {
+  padding: 0.625rem;
+  background: none;
+  border: none;
+  color: #999;
+  font-size: 0.875rem;
+  cursor: pointer;
+  transition: color 0.15s;
+}
+
+.dismiss-btn:hover {
+  color: #555;
+}
+
+.secondary-upgrade-btn {
+  padding: 0.625rem 1.25rem;
+  background: #f0f0f5;
+  color: #555;
+  border: 1px solid #ddd;
+  border-radius: 8px;
+  font-size: 0.9rem;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.secondary-upgrade-btn:hover { background: #e5e5ef; }
+
+.credit-packages {
+  display: flex;
+  gap: 0.6rem;
+  justify-content: center;
+  margin-bottom: 0.5rem;
+}
+.credit-package-btn {
+  flex: 1;
+  padding: 0.7rem 0;
+  background: linear-gradient(135deg, #667eea, #764ba2);
+  color: white;
+  border: none;
+  border-radius: 8px;
+  font-size: 1rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: opacity 0.15s;
+}
+.credit-package-btn:hover { opacity: 0.85; }
+
+.credits-badge {
+  font-size: 0.7rem;
+  color: #5a6abf;
+  background: #eef0ff;
+  border-radius: 999px;
+  padding: 0.15rem 0.5rem;
+  cursor: pointer;
+  transition: background 0.15s;
+  white-space: nowrap;
+}
+.credits-badge:hover { background: #dce0ff; }
+.credits-badge.credits-low {
+  color: #c0392b;
+  background: #fdecea;
+}
+.credits-badge.credits-low:hover { background: #f9d5d3; }
+
+/* Anonymous user registration prompt */
+.register-prompt {
+  margin: 0.5rem 0.75rem;
+  padding: 0.75rem;
+  background: linear-gradient(135deg, #667eea15, #764ba215);
+  border: 1px solid #667eea40;
+  border-radius: 10px;
+}
+.register-prompt-body {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  margin-bottom: 0.6rem;
+}
+.register-prompt-icon { font-size: 1.3rem; flex-shrink: 0; }
+.register-prompt-title { font-size: 0.82rem; font-weight: 600; color: #333; }
+.register-prompt-sub { font-size: 0.73rem; color: #666; margin-top: 0.1rem; }
+.register-prompt-actions { display: flex; flex-direction: column; gap: 0.35rem; }
+.register-email-btn {
+  width: 100%;
+  padding: 0.45rem 0.75rem;
+  background: linear-gradient(135deg, #667eea, #764ba2);
+  color: white;
+  border: none;
+  border-radius: 7px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: opacity 0.15s;
+}
+.register-email-btn:hover { opacity: 0.88; }
+.signin-link-btn {
+  background: none;
+  border: none;
+  color: #667eea;
+  font-size: 0.73rem;
+  cursor: pointer;
+  text-align: center;
+  padding: 0.1rem 0;
+  text-decoration: underline;
+}
+.signin-link-btn:hover { color: #764ba2; }
 
 /* Chat Container */
 .chat-container {
@@ -862,6 +1375,114 @@ body {
   box-shadow: 0 1px 2px rgba(0,0,0,0.04);
 }
 
+/* ── Markdown rendering inside chat bubbles ─────────────────────────────── */
+.markdown-body > * { margin: 0; }
+.markdown-body > * + * { margin-top: 0.4em; }
+
+.markdown-body p { line-height: 1.5; }
+
+.markdown-body h1,
+.markdown-body h2,
+.markdown-body h3,
+.markdown-body h4 { font-weight: 600; line-height: 1.3; }
+.markdown-body h1 { font-size: 1.2em; }
+.markdown-body h2 { font-size: 1.1em; }
+.markdown-body h3 { font-size: 1em; }
+
+.markdown-body ul,
+.markdown-body ol { padding-left: 1.4em; }
+.markdown-body li + li { margin-top: 0.2em; }
+
+.markdown-body code {
+  font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+  font-size: 0.85em;
+  padding: 0.15em 0.35em;
+  border-radius: 4px;
+}
+
+.message.sent .markdown-body code {
+  background: rgba(255,255,255,0.2);
+}
+.message.received .markdown-body code {
+  background: #f0f0f5;
+  color: #c7254e;
+}
+
+.markdown-body pre {
+  border-radius: 6px;
+  padding: 0.7em 0.9em;
+  overflow-x: auto;
+  margin-top: 0.5em;
+}
+.markdown-body pre code {
+  padding: 0;
+  border-radius: 0;
+  font-size: 0.82em;
+}
+.message.sent .markdown-body pre {
+  background: rgba(0,0,0,0.25);
+}
+.message.received .markdown-body pre {
+  background: #f6f8fa;
+  border: 1px solid #e1e4e8;
+}
+
+.markdown-body blockquote {
+  padding-left: 0.8em;
+  margin-left: 0;
+  font-style: italic;
+  opacity: 0.85;
+}
+.message.sent .markdown-body blockquote {
+  border-left: 3px solid rgba(255,255,255,0.5);
+}
+.message.received .markdown-body blockquote {
+  border-left: 3px solid #ccc;
+  color: #555;
+}
+
+.markdown-body a {
+  text-decoration: underline;
+  word-break: break-all;
+}
+.message.sent .markdown-body a { color: #dde; }
+.message.received .markdown-body a { color: #5a6abf; }
+
+.markdown-body hr {
+  border: none;
+  border-top: 1px solid;
+  margin: 0.6em 0;
+  opacity: 0.3;
+}
+
+.markdown-body table {
+  border-collapse: collapse;
+  font-size: 0.87em;
+  width: 100%;
+  margin-top: 0.4em;
+}
+.markdown-body th,
+.markdown-body td {
+  padding: 0.3em 0.6em;
+  text-align: left;
+}
+.message.sent .markdown-body th,
+.message.sent .markdown-body td {
+  border: 1px solid rgba(255,255,255,0.3);
+}
+.message.received .markdown-body th,
+.message.received .markdown-body td {
+  border: 1px solid #ddd;
+}
+.message.sent .markdown-body th { background: rgba(0,0,0,0.15); }
+.message.received .markdown-body th { background: #f6f8fa; }
+
+.markdown-body strong { font-weight: 600; }
+.markdown-body em { font-style: italic; }
+.markdown-body del { text-decoration: line-through; opacity: 0.75; }
+
+/* ─────────────────────────────────────────────────────────────────────────── */
+
 .message-time {
   font-size: 0.7rem;
   color: #bbb;
@@ -947,6 +1568,16 @@ body {
 
 .remove-attachment-btn:hover {
   background: #ccc;
+}
+
+.extracted-ok {
+  font-size: 0.7rem;
+  background: #e8f5e9;
+  color: #2e7d32;
+  border-radius: 4px;
+  padding: 1px 5px;
+  margin-left: 4px;
+  font-weight: 500;
 }
 
 /* Message Input */
@@ -1211,11 +1842,6 @@ body {
 
   .agent-form {
     padding: 0.5rem;
-  }
-
-  .mention-dropdown {
-    left: 0.5rem;
-    right: 0.5rem;
   }
 
   .user-avatar-wrapper {
